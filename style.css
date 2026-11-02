@@ -449,3 +449,9 @@ input[type=range]::-moz-range-thumb{width:22px;height:22px;border-radius:50%;bac
 .vh{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden;clip:rect(0 0 0 0);pointer-events:none}
 .bk-text{width:100%;min-height:96px;border-radius:14px;border:1.5px solid var(--line);background:var(--surface);color:var(--ink);font:500 12.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;padding:10px 12px;resize:vertical}
 label.btn{cursor:pointer}
+
+/* ---------- ball outcome, view switch */
+.ball-meta{grid-template-columns:repeat(3,1fr)}
+.ball-meta span{padding:9px 10px}
+.next-chip.warn{background:var(--orange-soft);color:var(--ink);box-shadow:none}
+#viewSeg{margin-top:-2px}

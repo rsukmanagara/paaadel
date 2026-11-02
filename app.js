@@ -18,9 +18,9 @@
   const GYRO_MAX = 34.4;       // rad/s (~1970 °/s) — most phone gyros clip at 2000 °/s
   const GMAX = 100;            // gauge full scale, km/h ball
   const SENS = {
-    light: { label: 'Santai', w: 6 },
-    medium: { label: 'Sedang', w: 9 },
-    full: { label: 'Kenceng', w: 13 }
+    light: { label: 'Santai', w: 5 },
+    medium: { label: 'Sedang', w: 7 },
+    full: { label: 'Kenceng', w: 10 }
   };
   const STROKES = {
     FH: { n: 'Forehand', en: 'Forehand', d: 'Pukulan sisi forehand' },
@@ -99,7 +99,7 @@
   const DEFAULTS = {
     goal: 20, sound: true, soundKind: 'pop', dynamic: true, vibrate: true,
     coach: true, coachLang: 'id', unit: 'kmh', sens: 'medium', fine: 1, hand: 'R', calib: 1,
-    autolock: true, seenHowTo: false, theme: 'auto', zone: { on: false, min: 35, max: 48, preset: 'kontrol' },
+    autolock: true, seenHowTo: false, theme: 'auto', axis: null, zone: { on: false, min: 35, max: 48, preset: 'kontrol' },
     look: { racket: 'classic', ribbon: true, ribbonColor: 'speed', ribbonWidth: 'face', ghosts: true, ghostDensity: 'normal', peak: true, dots: false }
   };
   function load(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }
@@ -167,7 +167,7 @@
   }
   const zoneOf = v => !set.zone.on ? null : v < set.zone.min ? 'low' : v > set.zone.max ? 'high' : 'in';
   // racket-face tilt at contact (deg, + = open face), common coaching reference per stroke
-  const FACE = { FH: [-5, 20], BH: [-5, 20], VL: [5, 25], BJ: [10, 35], VB: [0, 20], SM: [-15, 10], LB: [25, 55], SV: [0, 25] };
+  const FACE = { FH: [0, 20], BH: [0, 20], VL: [5, 25], BJ: [10, 35], VB: [0, 20], SM: [-15, 10], LB: [25, 55], SV: [0, 25] };
 
   /* ===================== stats helpers ===================== */
   function recordSwing(racket, stroke, countToRing = true) {
@@ -213,6 +213,7 @@
       return [vx + w * tx + (y * tz - z * ty), vy + w * ty + (z * tx - x * tz), vz + w * tz + (x * ty - y * tx)];
     },
     norm(q) { const l = Math.hypot(q[0], q[1], q[2], q[3]) || 1; return [q[0] / l, q[1] / l, q[2] / l, q[3] / l]; },
+    conj(q) { return [-q[0], -q[1], -q[2], q[3]]; },
     slerp(a, b, t) {
       let [bx, by, bz, bw] = b; let d = a[0] * bx + a[1] * by + a[2] * bz + a[3] * bw;
       if (d < 0) { d = -d; bx = -bx; by = -by; bz = -bz; bw = -bw; }
@@ -347,13 +348,30 @@
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && Wake.want) Wake.on(); });
 
   /* ===================== motion sensors ===================== */
+  /* Device frame: x across the screen, y along the phone (= racket axis, top = tip), z out of the screen (= string face).
+     A real stroke rotates the phone about x with the screen leading (ωx > 0); a backswing is ωx < 0; a wrist twist is ωy.
+     rotationRate axis naming differs between engines (W3C: x=beta, y=gamma, z=alpha; WebKit/iOS reports x=alpha, y=beta,
+     z=gamma), so the mapping is learned by comparing the gyro with the rotation seen in the orientation stream. */
+  const PERMS = [[1, 2, 0], [0, 1, 2], [0, 2, 1], [1, 0, 2], [2, 0, 1], [2, 1, 0]];
+  const AXMAPS = [];
+  PERMS.forEach(p => { for (let sb = 0; sb < 8; sb++) AXMAPS.push({ p, s: [sb & 1 ? -1 : 1, sb & 2 ? -1 : 1, sb & 4 ? -1 : 1] }); });
+  const mapRaw = (i, r) => { const m = AXMAPS[i]; return [m.s[0] * r[m.p[0]], m.s[1] * r[m.p[1]], m.s[2] * r[m.p[2]]]; };
+  const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const DEFAULT_MAP = IS_IOS ? 8 : 0; // 8 = WebKit (x=alpha, y=beta, z=gamma), 0 = W3C
   const Motion = (() => {
     const subs = new Set(), buf = [], obuf = [];
     let ok = false, sim = false, listening = false, nEv = 0, firstCb = null, lastT = 0, rate = 0, lastOriE = null;
+    const ua = navigator.userAgent.slice(0, 90);
+    let mapIdx = DEFAULT_MAP, locked = false, oriW = null, prevOri = null, gAcc = [0, 0, 0], gN = 0;
+    const cal = { err: new Float64Array(AXMAPS.length), n: 0, mag: 0 };
+    if (set.axis && set.axis.ua === ua && AXMAPS[set.axis.i]) { mapIdx = set.axis.i; locked = true; }
+    function recalibrate() { cal.err.fill(0); cal.n = 0; cal.mag = 0; locked = false; mapIdx = DEFAULT_MAP; set.axis = null; persist(true); }
     function emit(s) {
       buf.push(s); const cut = s.t - 6000; while (buf.length && buf[0].t < cut) buf.shift();
       lastT = s.t; subs.forEach(f => { try { f(s); } catch (e) { console.error(e); } });
     }
+    // s.h = face-leading rotation (rad/s, + = forward stroke); s.perp = rotation that actually moves the racket head
+    function emitDev(t, v, mag, sat) { emit({ t, w: mag, wx: v[0], wy: v[1], wz: v[2], h: v[0], perp: Math.hypot(v[0], v[2]), sat }); }
     function pushOri(t, q) { obuf.push({ t, q }); const cut = t - 6000; while (obuf.length && obuf[0].t < cut) obuf.shift(); }
     function onMotion(e) {
       const r = e.rotationRate; if (!r || (r.alpha == null && r.beta == null && r.gamma == null)) return;
@@ -361,13 +379,44 @@
       if (lastT && !sim) { const dt = t - lastT; if (dt > 0 && dt < 250) rate = rate ? rate * 0.95 + (1000 / dt) * 0.05 : 1000 / dt; }
       if (firstCb) { const f = firstCb; firstCb = null; f(); }
       if (sim) return;
-      const wx = +r.beta || 0, wy = +r.gamma || 0, wz = +r.alpha || 0; // °/s about device x, y, z
-      emit({ t, w: Math.hypot(wx, wy, wz) * DEG, wx, wy, wz });
+      const raw = [(+r.alpha || 0) * DEG, (+r.beta || 0) * DEG, (+r.gamma || 0) * DEG];
+      gAcc[0] += raw[0]; gAcc[1] += raw[1]; gAcc[2] += raw[2]; gN++;
+      // until the axis map is confirmed: direction from the orientation stream, size always from the gyro
+      // (an orientation glitch can then never create a fake fast swing)
+      const mag = Math.hypot(raw[0], raw[1], raw[2]);
+      let v = mapRaw(mapIdx, raw);
+      if (!locked && oriW && t - oriW.t < 80) { const om = Math.hypot(oriW.v[0], oriW.v[1], oriW.v[2]); if (om > 0.05 && om < 2 * mag + 2) v = oriW.v.map(c => c / om * mag); }
+      emitDev(t, v, mag, Math.max(Math.abs(raw[0]), Math.abs(raw[1]), Math.abs(raw[2])) >= GYRO_MAX);
     }
     function onOri(e) {
       if (sim || (e.beta == null && e.gamma == null)) return;
+      const t = now();
       lastOriE = { a: e.alpha || 0, b: e.beta || 0, g: e.gamma || 0 };
-      pushOri(now(), Q.euler(lastOriE.a, lastOriE.b, lastOriE.g));
+      const q = Q.euler(lastOriE.a, lastOriE.b, lastOriE.g);
+      if (prevOri) {
+        const dt = (t - prevOri.t) / 1000;
+        if (dt > 0.004 && dt < 0.08) {
+          let d = Q.mul(Q.conj(prevOri.q), q); if (d[3] < 0) d = d.map(c => -c);
+          const sh = Math.hypot(d[0], d[1], d[2]), ang = 2 * Math.atan2(sh, d[3]);
+          const v = sh > 1e-9 ? [d[0] / sh * ang / dt, d[1] / sh * ang / dt, d[2] / sh * ang / dt] : [0, 0, 0];
+          oriW = { t, v };
+          if (!locked && gN) calibrate([gAcc[0] / gN, gAcc[1] / gN, gAcc[2] / gN], v);
+        }
+      }
+      gAcc = [0, 0, 0]; gN = 0;
+      prevOri = { t, q }; pushOri(t, q);
+    }
+    function calibrate(g, v) {
+      const m = Math.hypot(v[0], v[1], v[2]), gm = Math.hypot(g[0], g[1], g[2]);
+      if (m < 1 || m > 20 || Math.abs(m - gm) > 0.6 * Math.max(m, gm) + 0.5) return; // skip glitches
+      for (let i = 0; i < AXMAPS.length; i++) { const u = mapRaw(i, g); cal.err[i] += (u[0] - v[0]) ** 2 + (u[1] - v[1]) ** 2 + (u[2] - v[2]) ** 2; }
+      cal.n++; cal.mag += m * m;
+      if (cal.n < 40) return;
+      let b = 0; for (let i = 1; i < AXMAPS.length; i++) if (cal.err[i] < cal.err[b]) b = i;
+      // the closest rival that disagrees on what matters (forward axis + its sign, or the sideways axis)
+      const B = AXMAPS[b]; let r = -1;
+      for (let i = 0; i < AXMAPS.length; i++) { const A = AXMAPS[i]; if (A.p[0] === B.p[0] && A.s[0] === B.s[0] && A.p[2] === B.p[2]) continue; if (r < 0 || cal.err[i] < cal.err[r]) r = i; }
+      if ((cal.err[b] < 0.3 * cal.err[r] && cal.err[b] / cal.mag < 0.35) || cal.n >= 500) { mapIdx = b; locked = true; set.axis = { i: b, ua }; persist(true); }
     }
     function listen() { if (listening) return; listening = true; addEventListener('devicemotion', onMotion); addEventListener('deviceorientation', onOri); }
     async function ensure() {
@@ -417,52 +466,78 @@
       if (simTimer) return;
       rate = 60;
       simTimer = setInterval(() => {
-        const t = now(); let w = 0.12 + Math.random() * 0.2, theta = -1.9, tilt = 0.35;
+        const t = now(); let hx = (Math.random() - 0.5) * 0.3, theta = -1.9, tilt = 0.35;
         if (simSw) {
           const u = (t - simSw.t0) / 1000 - 0.5;
           if (u > 0.9) { simSw = null; }
           else {
             const S1 = 1 / (1 + Math.exp(-u / simSw.tau));
             theta = -1.9 + simSw.D * S1; tilt = 0.35 - 0.5 * S1 + 0.25 * Math.max(0, S1 - 0.8);
-            w += simSw.D / simSw.tau * S1 * (1 - S1) + 1.6 * Math.exp(-Math.pow((u + 0.32) / 0.1, 2));
+            hx += simSw.D / simSw.tau * S1 * (1 - S1) - 4 * Math.exp(-Math.pow((u + 0.32) / 0.09, 2)); // forward swing after a backswing
           }
         }
         pushOri(t, poseQ(theta, tilt, simSw ? simSw.face : 0.15));
-        emit({ t, w, wx: 0, wy: 0, wz: w / DEG });
+        emitDev(t, [hx, (Math.random() - 0.5) * 0.3, (Math.random() - 0.5) * 0.3], Math.abs(hx) + 0.1, false);
       }, 16);
     }
     function simSwing(power) {
       if (!sim) return;
       const D = 4.1 + Math.random() * 0.4, peak = power || (14 + Math.random() * 9);
-      simSw = { t0: now(), D, tau: D / (4 * peak), face: (Math.random() * 34 - 6) * DEG };
+      simSw = { t0: now(), D, tau: D / (4 * peak), face: (Math.random() * 30 - 4) * DEG };
     }
     return {
-      ensure, sub, samples, oriAt, currentQ, simSwing,
+      ensure, sub, samples, oriAt, currentQ, simSwing, recalibrate,
+      calStatus: () => ({ locked: sim || locked, n: cal.n, map: mapIdx }),
       isSim: () => sim, isOn: () => ok || sim, rate: () => rate, lastT: () => lastT, lastOri: () => lastOriE, events: () => nEv
     };
   })();
 
-  /* swing detector: crossing the threshold opens a swing; first drop off the peak = contact (sound);
-     swing closes when speed falls well below the threshold; short cool-down stops double counts */
+  /* swing detector on the face-leading rotation:
+     - a swing opens when the forward rotation crosses the threshold (backswings are negative and never open one)
+     - at the first drop off the peak (≈ contact) it must have swept enough angle and be mostly face-leading,
+       otherwise it is a short flick or a wrist twist and is rejected without sound
+     - closes when the forward rotation dies down; short cool-down against double counts */
+  const MIN_SWEEP = { light: 15, medium: 25, full: 35 }; // degrees of forward rotation from the start of the stroke to its peak
+  const sweepMin = () => MIN_SWEEP[set.sens] * set.fine * DEG;
   class Detector {
-    constructor(getT, onHit, onSwing) { this.getT = getT; this.onHit = onHit; this.onSwing = onSwing; this.state = 'idle'; }
+    constructor(getT, onHit, onSwing, onReject) {
+      this.getT = getT; this.onHit = onHit; this.onSwing = onSwing; this.onReject = onReject;
+      this.state = 'idle'; this.lobe = false; this.sweep = 0; this.lastT = 0;
+    }
+    check() {
+      const s = this.peakS, total = Math.max(s.w, Math.hypot(s.wx, s.wy, s.wz));
+      if (this.peakSweep < sweepMin()) return 'short';
+      if (s.h < 0.5 * total) return 'twist';
+      return null;
+    }
     feed(s) {
-      const T = this.getT(), t = s.t, w = s.w;
+      const T = this.getT(), t = s.t, h = s.h, dt = this.lastT ? clamp((t - this.lastT) / 1000, 0, 0.05) : 0;
+      this.lastT = t;
+      if (h > 1.2) { if (!this.lobe) { this.lobe = true; this.sweep = 0; } this.sweep += h * dt; }
+      else if (h < 0.4) this.lobe = false;
       if (this.state === 'idle') {
-        if (w >= T) { this.state = 'rise'; this.peak = w; this.peakT = t; this.t0 = t; this.fired = false; }
+        if (this.lobe && h >= T) { this.state = 'rise'; this.peak = h; this.peakT = t; this.peakS = s; this.peakSweep = this.sweep; this.t0 = t; this.fired = false; this.bad = null; }
       } else if (this.state === 'rise') {
-        if (w > this.peak) { this.peak = w; this.peakT = t; }
-        else if (!this.fired && w < this.peak * 0.9) { this.fired = true; this.onHit && this.onHit(this.peak, this.peakT); }
-        if ((this.fired && w < T * 0.55) || t - this.t0 > 700) {
-          if (!this.fired) { this.fired = true; this.onHit && this.onHit(this.peak, this.peakT); }
-          this.onSwing && this.onSwing(this.peak, this.peakT);
-          this.state = 'cool'; this.coolUntil = t + 230; this.coolStart = t;
+        if (h > this.peak) { this.peak = h; this.peakT = t; this.peakS = s; this.peakSweep = this.sweep; }
+        else if (!this.fired && !this.bad && h < this.peak * 0.9) {
+          this.bad = this.check();
+          if (!this.bad) { this.fired = true; this.onHit && this.onHit(this.peakS.perp, this.peakT, this.peakS); }
+        }
+        if (h < T * 0.4 || !this.lobe || t - this.t0 > 700) {
+          if (!this.fired && !this.bad) { this.bad = this.check(); if (!this.bad) { this.fired = true; this.onHit && this.onHit(this.peakS.perp, this.peakT, this.peakS); } }
+          if (this.fired) this.onSwing && this.onSwing(this.peakS.perp, this.peakT, this.peakS);
+          else if (this.bad) this.onReject && this.onReject(this.bad, this.peakS);
+          this.state = 'cool'; this.coolUntil = t + 150; this.coolStart = t;
         }
       } else if (this.state === 'cool') {
-        if ((t >= this.coolUntil && w < T * 0.6) || t - this.coolStart > 1500) this.state = 'idle';
+        if ((t >= this.coolUntil && h < T * 0.5) || t - this.coolStart > 1500) this.state = 'idle';
       }
     }
   }
+  const REJECT_TXT = {
+    short: 'Ayunannya kependekan. Tarik dari belakang, terus ayun maju lebih panjang.',
+    twist: 'Kebanyakan muter pergelangan. Pastikan layar HP ngadep ke arah pukulan.'
+  };
 
   /* ===================== screen lock (palm on glass) ===================== */
   const Guard = (() => {
@@ -561,7 +636,7 @@
       <p class="sub">Atur seberapa kenceng ayunan yang dihitung jadi 1 rep.</p>
       <div class="seg" role="group" aria-label="Level sensitivitas">${Object.entries(SENS).map(([k, v]) => `<button data-act="lvl" data-k="${k}" aria-pressed="${set.sens === k}">${v.label}</button>`).join('')}</div>
       <div class="sens-sheet"><input type="range" id="fine" min="0.7" max="1.5" step="0.05" value="${set.fine}" aria-label="Setel halus"><div class="fine"><span>Lebih gampang</span><span id="fineLbl"></span><span>Lebih susah</span></div></div>
-      <p class="note">Santai cocok buat pemanasan. Kenceng buat yang mau nge-push power.</p>`, {
+      <p class="note">Yang dihitung cuma ayunan maju (layar HP di depan) yang cukup panjang dan kencang. Ancang-ancang dan muter pergelangan nggak dihitung. Santai cocok buat pemanasan; Kenceng buat yang mau nge-push power.</p>`, {
       close: closeOv,
       lvl: b => { set.sens = b.dataset.k; persist(); b.parentElement.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x.dataset.k === set.sens)); upd(); }
     });
@@ -696,7 +771,7 @@
       <p class="sub center cue" id="cue">Lecutin pergelangan kayak nyambuk. Tiap bunyi = 1 rep.</p>
       <div class="stats3"><div><b id="sN">0</b><small>&nbsp;</small><span>Rep</span></div><div><b class="or" id="sBest">–</b><small id="sBestR">&nbsp;</small><span>Terbaik</span></div><div><b id="sC">–</b><small id="sCs">&nbsp;</small><span id="sCl">Konsisten</span></div></div>
       <div class="strip-card"><div class="strip-head"><span class="label">Riwayat ayunan</span><span class="note" id="stripNote"></span></div><svg class="strip" id="strip" viewBox="0 0 320 64" aria-hidden="true"></svg></div>
-      <div class="hint" id="hint" hidden>${ICON.info}<span><b>Belum bunyi juga?</b>Lecutannya kurang tajam. Ayunan lengan yang pelan emang sengaja nggak dihitung.</span></div>
+      <div class="hint" id="hint" hidden>${ICON.info}<span><b>Belum bunyi juga?</b>Yang dihitung cuma ayunan maju dengan layar HP di depan, dan harus cukup panjang. Tarik dari belakang, terus lecutin ke depan.</span></div>
       <div class="grow"></div>
       <div class="s-bottom">${simBtn()}
         <div class="tools"><button class="chip" data-act="sens">${ICON.sliders}<span id="sensChip"></span></button><button class="chip" data-act="zone" id="zoneChip">${ICON.target}Zona: <span id="zoneLbl"></span></button></div>
@@ -729,27 +804,30 @@
       if (sig !== st.zSig) { st.zSig = sig; st.zIn = 0; st.zN = 0; }
       refreshStats();
     }
-    const det = new Detector(thr, pk => Snd.zoneHit(pk / 22, zoneOf(ballOf(racketKmh(pk)))), pk => onSwing(pk));
-    function onSwing(w) {
+    const det = new Detector(thr, pk => Snd.zoneHit(pk / 22, zoneOf(ballOf(racketKmh(pk)))), (pk, pt, ps) => onSwing(pk, ps), why => {
+      const cue = $('#cue'); cue.textContent = REJECT_TXT[why]; cue.className = 'sub center cue warn';
+    });
+    function onSwing(w, ps) {
+      const sat = !!(ps && ps.sat);
       const r = racketKmh(w), ball = ballOf(r); st.n++; st.best = Math.max(st.best, r); st.sum += r; st.lastAt = now(); st.balls.push(ball);
       recordSwing(r, null, true); if (prevBest > 0 && r > prevBest) st.newBest = true;
       const z = zoneOf(ball); if (z) { st.zN++; if (z === 'in') st.zIn++; }
       $('#hint').hidden = true;
-      $('#lb').textContent = (w >= GYRO_MAX ? '≥' : '') + fv(ball); $('#lr').textContent = fv(r);
+      $('#lb').textContent = (sat ? '≥' : '') + fv(ball); $('#lr').textContent = fv(r);
       const n = $('#gN'); n.classList.remove('pop'); void n.offsetWidth; n.classList.add('pop');
       n.classList.toggle('in', z === 'in'); n.classList.toggle('out', z === 'low' || z === 'high');
       gaugeLast(ball);
       $('#sN').textContent = st.n;
       $('#sBest').textContent = '≈' + fv(ballOf(st.best)); $('#sBestR').textContent = fv(st.best) + ' raket';
       const cue = $('#cue');
-      cue.textContent = w >= GYRO_MAX ? 'Mentok batas giroskop HP, aslinya bisa lebih kenceng!'
+      cue.textContent = sat ? 'Mentok batas giroskop HP, aslinya bisa lebih kenceng!'
         : z === 'in' ? 'Pas di zona! Pertahanin temponya.' : z === 'high' ? 'Kekencengan. Kontrol dikit.' : z === 'low' ? 'Kurang kenceng. Lecutin lagi.'
         : st.newBest ? 'Rekor baru! Pertahanin.' : 'Lecutin pergelangan kayak nyambuk. Tiap bunyi = 1 rep.';
       cue.className = 'sub center cue' + (z === 'in' ? ' good' : z === 'high' || z === 'low' ? ' warn' : '');
       refreshStats();
       Guard.engage();
     }
-    const unsub = Motion.sub(s => { det.feed(s); mv = Math.max(mv, s.w); });
+    const unsub = Motion.sub(s => { det.feed(s); mv = Math.max(mv, s.h); });
     const loop = () => { const pc = clamp(ballOf(racketKmh(mv)) / GMAX * 100, 0, 100); live.setAttribute('stroke-dasharray', `${pc.toFixed(1)} 100`); live.style.opacity = pc < 1.5 ? 0 : 1; mv *= 0.86; raf = requestAnimationFrame(loop); };
     loop(); refreshMode();
     const iv = setInterval(() => {
@@ -831,7 +909,7 @@
       <ol class="steps">
         <li><span>Pegang HP kayak gagang raket, pakai grip yang biasa kamu pakai buat pukulan itu. <b>Atas HP = ujung raket</b>, <b>layar = muka raket</b> yang ngadep ke arah pukulan.</span></li>
         <li><span>Tap mulai, terus ambil posisi siap. Ada bunyi tik, tik, ding: itu tandanya mulai ngerekam.</span></li>
-        <li><span>Lecutin pergelangan kayak nyambuk. Bunyi "pok" = titik paling kencang. Ayunan lengan yang pelan sengaja nggak dihitung.</span></li>
+        <li><span>Ayun maju dan lecutin pergelangan kayak nyambuk. Bunyi "pok" = titik paling kencang. Ancang-ancang, ayunan pendek, dan muter pergelangan sengaja nggak dihitung.</span></li>
         <li><span>Pegang yang kenceng atau pakai tali HP, dan pastiin ada ruang kosong 2 meter di sekitar kamu.</span></li>
       </ol>
       <div class="grow"></div>
@@ -861,7 +939,7 @@
       : `<div class="list">${list.length ? list.map(r => `<div class="row" style="padding-left:6px">
             <button class="round ghost" data-act="star" data-id="${r.id}" aria-label="${r.star ? 'Hapus bintang' : 'Kasih bintang'}" style="color:${r.star ? 'var(--orange)' : 'var(--ink-3)'}">${r.star ? ICON.starFill : ICON.star}</button>
             <button class="row" data-act="open" data-id="${r.id}" style="padding:4px 0;border:0;min-height:0;flex:1">
-              <span class="t"><b>${STROKES[r.stroke].n}</b><span>${whenLabel(r.date)} · ≈${fv(ballOf(r.peak))} ${U()} bola${r.src === 'gyro' ? '' : ' · muka ' + faceTxt(faceMetrics(r).face).toLowerCase()}</span></span><span class="vs">${ICON.chev}</span></button></div>`).join('')
+              <span class="t"><b>${STROKES[r.stroke].n}</b><span>${whenLabel(r.date)} · ≈${fv(ballOf(r.peak))} ${U()} bola · ${BALL_RES[ballFlight(r).res][0].toLowerCase()}${r.src === 'gyro' ? '' : ' · muka ' + faceTxt(faceMetrics(r).face).toLowerCase()}</span></span><span class="vs">${ICON.chev}</span></button></div>`).join('')
           : '<div class="row"><span class="sub">Belum ada replay. Rekam 1 pukulan dulu di tab Rekam baru.</span></div>'}</div>
         <p class="note">Replay berbintang nggak bakal kehapus otomatis. PAAADEL nyimpen 40 replay terakhir di HP ini.</p>`}
       ${tabbar('analysis')}
@@ -905,7 +983,7 @@
       const sb = $('#simBtn'); if (sb) sb.hidden = false;
       Guard.engage();
       const T0 = thr() * 0.85;
-      det = new Detector(() => T0, pk => Snd.hit(pk / 22), (pk, pkT) => { if (done) return; done = true; waitCapture(pkT); });
+      det = new Detector(() => T0, pk => Snd.hit(pk / 22), (pk, pkT) => { if (done) return; done = true; waitCapture(pkT); }, why => { if (!done) $('#recS').textContent = 'Belum kehitung. ' + REJECT_TXT[why]; });
       unsub = Motion.sub(s => det.feed(s));
       timers.push(setTimeout(() => { if (!done) noSwing(); }, 25000));
     }
@@ -940,7 +1018,7 @@
     let q = Motion.currentQ() || Q.euler(0, 80, 0); const out = [];
     for (let i = 0; i < ms.length; i++) {
       if (i > 0) {
-        const dt = (ms[i].t - ms[i - 1].t) / 1000, wx = ms[i].wx * DEG, wy = ms[i].wy * DEG, wz = ms[i].wz * DEG, m = Math.hypot(wx, wy, wz);
+        const dt = (ms[i].t - ms[i - 1].t) / 1000, wx = ms[i].wx, wy = ms[i].wy, wz = ms[i].wz, m = Math.hypot(wx, wy, wz);
         if (m > 1e-6) q = Q.norm(Q.mul(q, Q.axis(wx / m, wy / m, wz / m, m * dt)));
       }
       out.push(q);
@@ -950,7 +1028,7 @@
   function buildReplay(pkT, stroke, hand) {
     const ms = Motion.samples(pkT - 1250, pkT + 700); if (ms.length < 15) return null;
     let pi = 0, pw = -1;
-    ms.forEach((s, i) => { if (Math.abs(s.t - pkT) < 90 && s.w > pw) { pw = s.w; pi = i; } });
+    ms.forEach((s, i) => { if (Math.abs(s.t - pkT) < 90 && s.h > pw) { pw = s.h; pi = i; } });
     if (pw < 0) return null;
     const tPk = ms[pi].t;
     let qs = ms.map(s => Motion.oriAt(s.t)), src = 'ori';
@@ -965,8 +1043,8 @@
     const rd = (v, d) => Math.round(v * d) / d;
     return {
       id: 'r' + Date.now().toString(36), date: Date.now(), stroke, hand, k: set.calib, star: false, src,
-      peak: rd(racketKmh(pw), 10), sat: pw >= GYRO_MAX,
-      t: ms.map(s => rd((s.t - tPk) / 1000, 1000)), w: ms.map(s => rd(s.w, 100)), q: qw.map(q => q.map(c => rd(c, 10000)))
+      peak: rd(racketKmh(ms[pi].perp), 10), sat: !!ms[pi].sat,
+      t: ms.map(s => rd((s.t - tPk) / 1000, 1000)), w: ms.map(s => rd(s.perp, 100)), q: qw.map(q => q.map(c => rd(c, 10000)))
     };
   }
 
@@ -996,16 +1074,42 @@
     </div>`;
   }
 
+  function ballCard(rep, fl) {
+    const [lbl, cls] = BALL_RES[fl.res], m = v => v.toFixed(1).replace('.', ',');
+    const items = [];
+    if (fl.netY != null) items.push(['Di net', fl.res === 'net' ? `nabrak ${m(fl.netY)} m` : `+${m(fl.netY - NET_H)} m di atas`]);
+    if (fl.res === 'in') items.push(['Jatuh', `${m(fl.depth)} m dari net`]);
+    if (fl.res !== 'back') items.push(['Tinggi maks', `${m(fl.apex)} m`]);
+    const lowOver = fl.netY != null && fl.netY - NET_H < 0.6;
+    const fm = rep.src === 'gyro' ? null : faceMetrics(rep), [flo, fhi] = FACE[rep.stroke], fClosed = !!fm && fm.face < flo, fOpen = !!fm && fm.face > fhi;
+    const tip = {
+      in: rep.stroke === 'LB' ? (fl.depth >= 7 ? 'Lob dalam, mantap! Lawan dipaksa mundur ke kaca.' : 'Lob-nya kurang dalam. Angkat dikit lagi biar jatuh dekat kaca belakang lawan.')
+        : lowOver ? 'Mantap! Rendah di atas net dan masuk.' : 'Masuk, tapi agak tinggi di atas net. Tutup dikit muka raketnya biar lebih tajam.',
+      net: fClosed ? 'Bola nyangkut di net karena muka raketnya ketutup. Buka dikit biar bola naik.' : 'Bola nyangkut di net. Muka raketnya udah oke, jadi ayun lebih dari bawah ke atas atau lebih kencang.',
+      short: fClosed ? 'Bola jatuh sebelum net karena muka raketnya ketutup. Buka dikit dan ayun lebih ke depan.' : fOpen ? 'Bola kebanyakan naik dan jatuh sebelum net. Tutup dikit muka raketnya dan dorong lebih ke depan.' : 'Bola jatuh sebelum net. Muka raketnya udah oke, jadi ayun lebih kencang dan lebih ke depan.',
+      long: fOpen ? 'Kepanjangan karena muka raketnya kebuka banget. Tutup dikit atau kurangi tenaga.' : 'Kepanjangan, bola kena kaca belakang langsung. Muka raketnya udah oke, jadi kurangi tenaga atau ayun lebih rata ke depan.',
+      wide: 'Melebar, bola kena kaca samping langsung. Cek arah muka raket pas kena.',
+      back: 'Bola nggak maju ke depan. Pastikan layar HP jadi muka raket yang ngadep ke depan pas kena.'
+    }[fl.res];
+    return `<div class="card">
+      <div class="chart-head"><h3>Arah bola</h3><span class="pill ${cls}">${lbl}</span></div>
+      ${items.length ? `<div class="face-meta ball-meta">${items.map(([k, v]) => `<span>${k}<b>${v}</b></span>`).join('')}</div>` : ''}
+      <p class="sub" style="margin-top:12px">${tip}</p>
+      <p class="note" style="padding:8px 0 0">Perkiraan dari kecepatan, sudut muka raket, dan arah ayunan pas kena; spin dan posisi badanmu belum dihitung. Putar replay-nya: bola kuning terbang ke lapangan lawan.</p>
+    </div>`;
+  }
+
   /* ---------- replay (3D) ---------- */
   SCREENS.replay = function (p) {
     const rep = REPLAYS.find(r => r.id === p.id);
     if (!rep) return go('analysis', { tab: 'rep' });
-    const T0 = rep.t[0], T1 = rep.t[rep.t.length - 1];
+    const fl = ballFlight(rep), lastS = rep.t[rep.t.length - 1], T0 = rep.t[0], T1 = Math.max(lastS, fl.res !== 'back' ? fl.tEnd + 0.35 : 0);
     let t = p.fresh ? T0 : 0, playing = false, rate = 0.25, last = now(), raf = 0, ready = false;
     app.innerHTML = `<section class="scr" style="gap:12px">
       ${subhdr(STROKES[rep.stroke].n, `<button class="round" data-act="del" aria-label="Hapus replay">${ICON.trash}</button>`)}
       <div class="r3d" id="r3d"><canvas id="c3d" aria-label="Replay 3D ayunan"></canvas><div class="r3d-load" id="r3dLoad">Lagi nyiapin 3D…</div>
         <div class="tools"><button class="chip" data-act="resetView">${ICON.reset}Reset</button><span style="display:flex;gap:6px"><button class="chip" data-act="look">${ICON.sliders}Tampilan</button><button class="chip" data-act="snap">${ICON.image}Simpan</button></span></div></div>
+      <div class="seg compact" id="viewSeg" role="group" aria-label="Sudut kamera">${[['auto', 'Auto'], ['swing', 'Ayunan'], ['side', 'Samping'], ['court', 'Lapangan']].map(([k, l]) => `<button data-act="view" data-k="${k}" aria-pressed="${k === 'auto'}">${l}</button>`).join('')}</div>
       <div class="r-info"><span class="when" id="rInfo"></span><span class="note">${whenLabel(rep.date)}</span></div>
       <div class="r-speeds"><div><span>Bola ≈</span><b class="or" id="rBall">0</b><small>${U()}</small></div><div><span>Raket</span><b id="rRacket">0</b><small>${U()}</small></div></div>
       <div class="scrub-card">
@@ -1017,8 +1121,9 @@
           <div class="seg compact" role="group" aria-label="Kecepatan putar">${[['0.25', '¼×'], ['0.5', '½×'], ['1', '1×']].map(([v, l]) => `<button data-act="rate" data-k="${v}" aria-pressed="${+v === rate}">${l}</button>`).join('')}</div>
         </div>
       </div>
+      ${ballCard(rep, fl)}
       ${faceCard(rep)}
-      <p class="note">Sisi terang raket = muka raket (layar HP). Bola oranye = titik paling kencang, di situ harusnya bola kena. Geser buat muter, cubit buat zoom. Posisi raket diperkirakan dari arah HP; kecepatannya dari giroskop.</p>
+      <p class="note">Sisi oranye + panah = muka raket (layar HP). Titik oranye = titik kena; bola kuning = perkiraan arah bola. Kamera Auto pindah ke lapangan setelah kena; geser buat muter, cubit buat zoom. Posisi badan diperkirakan; arah raket dan kecepatannya dari sensor HP.</p>
       <button class="btn teal" data-act="done">Selesai</button>
     </section>`;
     const kmh = w => racketKmh(w, rep.k);
@@ -1035,9 +1140,9 @@
       const pkW = Math.max(...rep.w); sctx.beginPath(); sctx.arc(X(0), Y(pkW), 5, 0, 7); sctx.fillStyle = orange; sctx.fill(); sctx.lineWidth = 2.5; sctx.strokeStyle = surf; sctx.stroke();
     }
     function ui() {
-      const r = kmh(wAt(t));
+      const r = kmh(t > lastS ? wAt(0) : wAt(t));
       $('#rBall').textContent = '≈' + fv(ballOf(r)); $('#rRacket').textContent = fv(r);
-      const tt = Math.abs(t) < 0.005 ? 'Pas kena' : (t < 0 ? `${Math.abs(t).toFixed(2)} dtk sebelum kena` : `${t.toFixed(2)} dtk setelah kena`);
+      const tt = Math.abs(t) < 0.005 ? 'Pas kena' : t < 0 ? `${Math.abs(t).toFixed(2)} dtk sebelum kena` : t > lastS + 0.01 ? `Bola terbang · ${t.toFixed(2)} dtk` : `${t.toFixed(2)} dtk setelah kena`;
       $('#rInfo').textContent = tt.replace('.', ',');
       const fr = (t - T0) / (T1 - T0); $('#ph').style.left = `calc(${(fr * 100).toFixed(2)}% - 1px)`;
       const sc = $('#scrub'); sc.value = Math.round(fr * 1000); sc.style.setProperty('--p', (fr * 100) + '%');
@@ -1050,6 +1155,8 @@
       ui(); raf = requestAnimationFrame(frame);
     }
     drawSpark(); ui(); frame();
+    const viewSeg = k => app.querySelectorAll('[data-act="view"]').forEach(x => x.setAttribute('aria-pressed', x.dataset.k === k));
+    R3D.onManual = () => viewSeg('manual');
     R3D.mount($('#c3d'), rep).then(() => { ready = true; $('#r3dLoad').hidden = true; if (p.fresh) { t = T0; setPlay(true); } })
       .catch(err => { if (String(err && err.message).includes('stale')) return; console.error(err); const l = $('#r3dLoad'); if (l) l.textContent = 'Tampilan 3D nggak bisa dimuat di perangkat ini. Grafik kecepatan di bawah tetap jalan.'; });
     bindInputs(app, { scrub: el => { setPlay(false); t = T0 + (+el.value / 1000) * (T1 - T0); } });
@@ -1061,7 +1168,8 @@
       play: () => setPlay(!playing),
       peak: () => { setPlay(false); t = 0; },
       rate: b => { rate = +b.dataset.k; app.querySelectorAll('[data-act="rate"]').forEach(x => x.setAttribute('aria-pressed', +x.dataset.k === rate)); },
-      resetView: () => R3D.resetView(),
+      resetView: () => { R3D.resetView(); viewSeg('auto'); },
+      view: b => { R3D.setView(b.dataset.k); viewSeg(b.dataset.k); },
       look: () => lookSheet(),
       snap: () => snapshot(),
       del: () => dialog('Hapus replay ini?', 'Replay-nya bakal hilang dari HP ini. Statistik kamu tetap aman.', [
@@ -1094,11 +1202,67 @@
     }
   };
 
+  /* ===================== swing geometry & ball flight (pure, no three.js) ===================== */
+  const peakIdx = rep => { let pi = 0; rep.t.forEach((tt, i) => { if (Math.abs(tt) < Math.abs(rep.t[pi])) pi = i; }); return pi; };
+  // racket pose is measured (orientation); its position is modelled: hand on an arm from the shoulder
+  function computeFrames(rep) {
+    const over = !!STROKES[rep.stroke].over, hs = rep.hand === 'L' ? -1 : 1, st = rep.stroke;
+    const pz = st === 'VL' ? 3.2 : over ? 5.4 : 7.6, px = 1.3 * hs;
+    const Sh = [px + 0.19 * hs, over ? 1.5 : 1.42, pz];
+    const bias = over ? [0, 0.3, -0.2] : [0, -0.8, -0.3];
+    return rep.q.map((q, i) => {
+      const d = Q.rot(q, [0, 1, 0]); const a = [d[0] + bias[0], d[1] + bias[1], d[2] + bias[2]]; const L = Math.hypot(a[0], a[1], a[2]) || 1;
+      const H = [Sh[0] + 0.58 * a[0] / L, Math.max(0.32, Sh[1] + 0.58 * a[1] / L), Sh[2] + 0.58 * a[2] / L];
+      const at = y => { const v = Q.rot(q, [0, y, 0]); return [H[0] + v[0], H[1] + v[1], H[2] + v[2]]; };
+      const W = Q.rot(q, [1, 0, 0]);
+      return { t: rep.t[i], w: rep.w[i], q, H, C: at(0.25), tip: at(0.40), thr: at(0.12), W };
+    });
+  }
+  const NET_H = 0.88, BALL_R = 0.033;
+  const BALL_RES = { in: ['Masuk', 'ok'], net: ['Nyangkut net', 'warn'], short: ['Nggak nyampe net', 'warn'], long: ['Kepanjangan', 'warn'], wide: ['Melebar', 'warn'], back: ['Nggak maju', 'warn'] };
+  const flightCache = new Map();
+  // launch ≈ 70% face normal + 30% racket-head path, speed = estimated ball speed; gravity + air drag
+  function ballFlight(rep) {
+    const key = rep.id + '|' + rep.k + '|' + rep.t.length; if (flightCache.has(key)) return flightCache.get(key);
+    const F = computeFrames(rep), pi = peakIdx(rep), f = F[pi], n = Q.rot(f.q, [0, 0, 1]);
+    const a = F[Math.max(0, pi - 1)].tip, b = F[Math.min(F.length - 1, pi + 1)].tip;
+    let v = [b[0] - a[0], b[1] - a[1], b[2] - a[2]]; const vl = Math.hypot(v[0], v[1], v[2]) || 1; v = v.map(c => c / vl);
+    let dir = [0.7 * n[0] + 0.3 * v[0], 0.7 * n[1] + 0.3 * v[1], 0.7 * n[2] + 0.3 * v[2]]; const dl = Math.hypot(dir[0], dir[1], dir[2]) || 1; dir = dir.map(c => c / dl);
+    const sp = ballOf(racketKmh(rep.w[pi], rep.k)) / 3.6;
+    let p = f.C.slice(), vel = dir.map(c => c * sp), tt = 0, res = null, netY = null, apex = p[1], land = null, step = 0;
+    const pts = [p.slice()], ts = [0], K = 0.019, G = 9.81, dt = 1 / 240;
+    if (vel[2] > -0.3) res = 'back';
+    while (!res && tt < 4) {
+      const s2 = Math.hypot(vel[0], vel[1], vel[2]);
+      const np = [p[0] + vel[0] * dt, p[1] + vel[1] * dt, p[2] + vel[2] * dt];
+      vel = [vel[0] - K * s2 * vel[0] * dt, vel[1] - (G + K * s2 * vel[1]) * dt, vel[2] - K * s2 * vel[2] * dt];
+      tt += dt;
+      if (p[2] > 0 && np[2] <= 0) { // crossing the net plane
+        const fr = p[2] / (p[2] - np[2]), y = p[1] + (np[1] - p[1]) * fr; netY = y;
+        if (y < NET_H + BALL_R) { res = 'net'; np[0] = p[0] + (np[0] - p[0]) * fr; np[1] = y; np[2] = 0.06; }
+      }
+      if (!res && np[1] <= BALL_R) { np[1] = BALL_R; land = np.slice(); res = np[2] >= 0 ? 'short' : Math.abs(np[0]) <= 5 ? 'in' : 'wide'; }
+      if (!res && np[2] <= -10 + BALL_R) { np[2] = -10 + BALL_R; res = 'long'; }
+      if (!res && np[2] < 0 && Math.abs(np[0]) >= 5 - BALL_R) res = 'wide';
+      p = np; apex = Math.max(apex, p[1]);
+      if (++step % 4 === 0 || res) { pts.push(p.slice()); ts.push(tt); }
+    }
+    if (!res) res = 'long';
+    if (res !== 'back' && res !== 'in' && res !== 'short') { // drop from the net / wall to the ground
+      let y = p[1], vy = Math.min(0, vel[1]) * 0.3, t2 = tt; const z = res === 'net' ? 0.06 : p[2], x = p[0];
+      while (y > BALL_R) { vy -= G / 60; y = Math.max(BALL_R, y + vy / 60); t2 += 1 / 60; pts.push([x, y, z]); ts.push(t2); }
+      land = [x, BALL_R, z]; tt = t2;
+    }
+    const out = { pts, ts, res, netY, apex, land, depth: land && land[2] < 0 ? -land[2] : null, tEnd: tt, speed: sp };
+    flightCache.set(key, out); return out;
+  }
+
   /* ===================== 3D replay engine (three.js, loaded on demand) ===================== */
   const R3D = (() => {
     let THREEp = null, THREE = null, renderer = null, scene = null, camera = null, canvas = null, rep = null, ro = null;
     let F = [], pi = 0, i0 = 0, i1 = 0, racket = null, shadow = null, ribbon = null, ghosts = [], dots = [], peakM = null, swingGrp = null;
-    let orbit = null, home = null, detach = null;
+    let ballM = null, ballSh = null, pathL = null, ringM = null, flight = null;
+    let orbit = null, home = null, detach = null, views = null, camMode = 'auto', curT = 0, onManual = null;
     function loadThree() {
       if (window.THREE) return Promise.resolve(window.THREE);
       return THREEp || (THREEp = new Promise((res, rej) => {
@@ -1110,7 +1274,7 @@
     const basic = (color, extra = {}) => new THREE.MeshBasicMaterial(Object.assign({ color }, extra));
     function buildCourt() {
       scene = new THREE.Scene();
-      scene.background = new THREE.Color(0xd6ece6); scene.fog = new THREE.Fog(0xd6ece6, 18, 46);
+      scene.background = new THREE.Color(0xd6ece6); scene.fog = new THREE.Fog(0xd6ece6, 22, 52);
       camera = new THREE.PerspectiveCamera(46, 1, 0.03, 140);
       scene.add(new THREE.HemisphereLight(0xffffff, 0x2a7f6a, 1.0));
       const dl = new THREE.DirectionalLight(0xffffff, 0.85); dl.position.set(3, 9, 6); scene.add(dl);
@@ -1141,7 +1305,8 @@
       const fg = new THREE.BufferGeometry().setFromPoints(pts);
       scene.add(new THREE.LineSegments(fg, new THREE.LineBasicMaterial({ color: 0x1d3a35, transparent: true, opacity: 0.35 })));
     }
-    const RACKET_COLORS = { classic: [0x1b2826, 0xf2f7f5], white: [0xd9e3df, 0xffffff], orange: [0xff6a2b, 0xffe7db], teal: [0x0e8a7a, 0xdff5f1] };
+    // [frame, string face (= phone screen), face arrow]
+    const RACKET_COLORS = { classic: [0x1b2826, 0xff7a3d, 0x0b6b60], white: [0xd9e3df, 0xff7a3d, 0x0b6b60], orange: [0xff6a2b, 0xffffff, 0x0b6b60], teal: [0x0e8a7a, 0xff7a3d, 0x1b2826] };
     let headShape = null, headPlain = null;
     function shapes() {
       if (headShape) return;
@@ -1154,7 +1319,7 @@
     }
     function makeRacket(ghost) {
       shapes();
-      const g = new THREE.Group(), [frameC, faceC] = RACKET_COLORS[set.look.racket] || RACKET_COLORS.classic;
+      const g = new THREE.Group(), [frameC, faceC, arrowC] = RACKET_COLORS[set.look.racket] || RACKET_COLORS.classic;
       if (ghost) {
         const m = basic(0xf4fffb, { transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false });
         const hg = new THREE.ShapeGeometry(headPlain, 20); hg.translate(0, 0.25, 0); g.add(new THREE.Mesh(hg, m));
@@ -1166,7 +1331,11 @@
       geo.translate(0, 0.25, -depth / 2);
       g.add(new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: frameC, roughness: 0.5, metalness: 0.1 })));
       const face = new THREE.ShapeGeometry(headShape, 28); face.translate(0, 0.25, depth / 2 + 0.0035);
-      g.add(new THREE.Mesh(face, new THREE.MeshStandardMaterial({ color: faceC, roughness: 0.75 })));
+      g.add(new THREE.Mesh(face, new THREE.MeshStandardMaterial({ color: faceC, roughness: 0.6, emissive: faceC, emissiveIntensity: 0.25 })));
+      // arrow out of the string face: which way the face points
+      const am = basic(arrowC), z0 = depth / 2 + 0.004;
+      const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.0075, 0.0075, 0.16, 10), am); shaft.rotation.x = Math.PI / 2; shaft.position.set(0, 0.25, z0 + 0.08); g.add(shaft);
+      const head = new THREE.Mesh(new THREE.ConeGeometry(0.022, 0.06, 16), am); head.rotation.x = Math.PI / 2; head.position.set(0, 0.25, z0 + 0.19); g.add(head);
       const th = new THREE.Shape(); th.moveTo(-0.02, 0.06); th.lineTo(0.02, 0.06); th.lineTo(0.08, 0.14); th.lineTo(-0.08, 0.14); th.closePath();
       const hole = new THREE.Path(); hole.moveTo(0, 0.085); hole.lineTo(0.035, 0.128); hole.lineTo(-0.035, 0.128); hole.closePath(); th.holes.push(hole);
       const thg = new THREE.ExtrudeGeometry(th, { depth: 0.028, bevelEnabled: false }); thg.translate(0, 0, -0.014);
@@ -1175,19 +1344,6 @@
       g.add(grip);
       const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.021, 0.021, 0.012, 18), new THREE.MeshStandardMaterial({ color: 0xff6a2b, roughness: 0.6 })); cap.position.y = -0.07; g.add(cap);
       return g;
-    }
-    function computeFrames() {
-      const over = !!STROKES[rep.stroke].over, hs = rep.hand === 'L' ? -1 : 1, st = rep.stroke;
-      const pz = st === 'VL' ? 3.2 : over ? 5.4 : 7.6, px = 1.3 * hs;
-      const Sh = [px + 0.19 * hs, over ? 1.5 : 1.42, pz];
-      const bias = over ? [0, 0.3, -0.2] : [0, -0.8, -0.3];
-      return rep.q.map((q, i) => {
-        const d = Q.rot(q, [0, 1, 0]); const a = [d[0] + bias[0], d[1] + bias[1], d[2] + bias[2]]; const L = Math.hypot(a[0], a[1], a[2]) || 1;
-        const H = [Sh[0] + 0.58 * a[0] / L, Math.max(0.32, Sh[1] + 0.58 * a[1] / L), Sh[2] + 0.58 * a[2] / L];
-        const at = y => { const v = Q.rot(q, [0, y, 0]); return [H[0] + v[0], H[1] + v[1], H[2] + v[2]]; };
-        const W = Q.rot(q, [1, 0, 0]);
-        return { t: rep.t[i], w: rep.w[i], q, H, C: at(0.25), tip: at(0.40), thr: at(0.12), W };
-      });
     }
     const ramp = [[0, [0.25, 0.62, 0.56]], [0.5, [0.93, 0.98, 0.96]], [0.8, [1.0, 0.55, 0.25]], [1, [0.92, 0.27, 0.12]]];
     function speedColor(x) {
@@ -1198,8 +1354,7 @@
     function buildSwing() {
       if (swingGrp) { scene.remove(swingGrp); swingGrp.traverse(o => { if (o.geometry) o.geometry.dispose(); }); }
       swingGrp = new THREE.Group(); scene.add(swingGrp);
-      F = computeFrames();
-      pi = 0; rep.t.forEach((tt, i) => { if (Math.abs(tt) < Math.abs(rep.t[pi])) pi = i; });
+      F = computeFrames(rep); pi = peakIdx(rep);
       const pk = Math.max(...rep.w), L = set.look;
       i0 = pi; while (i0 > 0 && (rep.w[i0 - 1] > pk * 0.16 || pi - i0 < 4)) i0--; i0 = Math.max(0, i0 - 2);
       i1 = pi; while (i1 < F.length - 1 && (rep.w[i1 + 1] > pk * 0.16 || i1 - pi < 4)) i1++; i1 = Math.min(F.length - 1, i1 + 2);
@@ -1231,19 +1386,46 @@
         const dg = new THREE.SphereGeometry(0.009, 8, 6);
         for (let i = i0; i <= i1; i++) { const c = speedColor(F[i].w / pk); const m = new THREE.Mesh(dg, basic(new THREE.Color(c[0], c[1], c[2]))); m.position.set(...F[i].C); m.userData.i = i; swingGrp.add(m); dots.push(m); }
       }
-      // peak marker (ball-sized)
+      // contact marker
       peakM = null;
-      if (L.peak) { peakM = new THREE.Mesh(new THREE.SphereGeometry(0.034, 20, 14), basic(0xff6a2b)); peakM.position.set(...F[pi].C); swingGrp.add(peakM); }
+      if (L.peak) { peakM = new THREE.Mesh(new THREE.SphereGeometry(0.03, 18, 12), basic(0xff6a2b)); peakM.position.set(...F[pi].C); swingGrp.add(peakM); }
       // racket + floor shadow
       racket = makeRacket(false); swingGrp.add(racket);
       shadow = new THREE.Mesh(new THREE.CircleGeometry(0.17, 24), basic(0x000000, { transparent: true, opacity: 0.18, depthWrite: false })); shadow.rotation.x = -Math.PI / 2; swingGrp.add(shadow);
-      // camera target = middle of the active swing
+      // ball flight
+      flight = ballFlight(rep);
+      ballM = new THREE.Mesh(new THREE.SphereGeometry(0.05, 20, 14), basic(0xf2e14c)); ballM.visible = false; swingGrp.add(ballM);
+      ballSh = new THREE.Mesh(new THREE.CircleGeometry(0.06, 18), basic(0x000000, { transparent: true, opacity: 0.22, depthWrite: false })); ballSh.rotation.x = -Math.PI / 2; ballSh.visible = false; swingGrp.add(ballSh);
+      pathL = new THREE.Line(new THREE.BufferGeometry().setFromPoints(flight.pts.map(p => new THREE.Vector3(p[0], p[1], p[2]))), new THREE.LineDashedMaterial({ color: 0xffffff, dashSize: 0.16, gapSize: 0.1, transparent: true, opacity: 0.95 }));
+      pathL.computeLineDistances(); pathL.geometry.setDrawRange(0, 0); swingGrp.add(pathL);
+      ringM = null;
+      if (flight.land) {
+        ringM = new THREE.Mesh(new THREE.RingGeometry(0.13, 0.22, 36), basic(flight.res === 'in' ? 0x0e8a7a : 0xff6a2b, { side: THREE.DoubleSide }));
+        ringM.rotation.x = -Math.PI / 2; ringM.position.set(flight.land[0], 0.012, flight.land[2]); ringM.visible = false; swingGrp.add(ringM);
+      }
+      // camera presets
       const c = [0, 0, 0]; for (let i = i0; i <= i1; i++) for (let j = 0; j < 3; j++) c[j] += F[i].C[j] / (i1 - i0 + 1);
-      const hs = rep.hand === 'L' ? -1 : 1;
+      const hs = rep.hand === 'L' ? -1 : 1, C = F[pi].C;
       home = { target: new THREE.Vector3(c[0], c[1], c[2]), az: -0.34 * hs, pol: 1.12, r: 2.35 };
+      const Ld = flight.land || [C[0], 0, C[2] - 6], span = Math.hypot(C[0] - Ld[0], C[2] - Ld[2]);
+      views = {
+        swing: home,
+        side: { target: new THREE.Vector3(C[0], C[1], C[2]), az: Math.PI / 2 * hs, pol: Math.PI / 2 - 0.08, r: 1.45 },
+        court: { target: new THREE.Vector3((C[0] + Ld[0]) / 2, 1.0, (C[2] + Ld[2]) / 2), az: -0.22 * hs, pol: 1.02, r: clamp(span * 0.9 + 4.5, 7, 17) }
+      };
       if (!orbit) orbit = { target: home.target.clone(), az: home.az, pol: home.pol, r: home.r };
     }
+    function desired() {
+      if (camMode === 'manual' || !views) return null;
+      if (camMode === 'auto') return curT > 0.04 && flight && flight.res !== 'back' ? views.court : views.swing;
+      return views[camMode] || null;
+    }
     function camUpdate() {
+      const d = desired();
+      if (d) {
+        const k = 0.09; let da = d.az - orbit.az; da = Math.atan2(Math.sin(da), Math.cos(da));
+        orbit.az += da * k; orbit.pol += (d.pol - orbit.pol) * k; orbit.r += (d.r - orbit.r) * k; orbit.target.lerp(d.target, k);
+      }
       const { az, pol, r, target } = orbit;
       camera.position.set(target.x + r * Math.sin(pol) * Math.sin(az), target.y + r * Math.cos(pol), target.z + r * Math.sin(pol) * Math.cos(az));
       camera.lookAt(target);
@@ -1255,15 +1437,17 @@
     }
     function attachOrbit() {
       const pts = new Map(); let pinch0 = 0, r0 = 0;
+      const manual = () => { if (camMode !== 'manual') { camMode = 'manual'; onManual && onManual(); } };
       const dist = () => { const [a, b] = [...pts.values()]; return Math.hypot(a.x - b.x, a.y - b.y); };
       const down = e => { canvas.setPointerCapture && canvas.setPointerCapture(e.pointerId); pts.set(e.pointerId, { x: e.clientX, y: e.clientY }); if (pts.size === 2) { pinch0 = dist(); r0 = orbit.r; } };
       const move = e => {
         if (!pts.has(e.pointerId)) return; const p = pts.get(e.pointerId); const dx = e.clientX - p.x, dy = e.clientY - p.y; p.x = e.clientX; p.y = e.clientY;
-        if (pts.size === 1) { orbit.az -= dx * 0.008; orbit.pol = clamp(orbit.pol - dy * 0.006, 0.12, 1.5); }
-        else if (pts.size === 2 && pinch0 > 0) orbit.r = clamp(r0 * pinch0 / Math.max(1, dist()), 0.8, 14);
+        if (Math.abs(dx) + Math.abs(dy) > 0) manual();
+        if (pts.size === 1) { orbit.az -= dx * 0.008; orbit.pol = clamp(orbit.pol - dy * 0.006, 0.12, 1.55); }
+        else if (pts.size === 2 && pinch0 > 0) orbit.r = clamp(r0 * pinch0 / Math.max(1, dist()), 0.8, 20);
       };
       const up = e => { pts.delete(e.pointerId); if (pts.size < 2) pinch0 = 0; };
-      const wheel = e => { e.preventDefault(); orbit.r = clamp(orbit.r * (1 + e.deltaY * 0.0012), 0.8, 14); };
+      const wheel = e => { e.preventDefault(); manual(); orbit.r = clamp(orbit.r * (1 + e.deltaY * 0.0012), 0.8, 20); };
       canvas.addEventListener('pointerdown', down); canvas.addEventListener('pointermove', move);
       ['pointerup', 'pointercancel'].forEach(ev => canvas.addEventListener(ev, up));
       canvas.addEventListener('wheel', wheel, { passive: false });
@@ -1274,7 +1458,7 @@
       const my = ++mountId;
       THREE = await loadThree();
       if (my !== mountId || !cv.isConnected) throw new Error('stale mount');
-      canvas = cv; rep = r; orbit = null;
+      canvas = cv; rep = r; orbit = null; camMode = 'auto';
       renderer = new THREE.WebGLRenderer({ canvas: cv, antialias: true, preserveDrawingBuffer: true });
       renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
       if ('outputEncoding' in renderer) renderer.outputEncoding = THREE.sRGBEncoding;
@@ -1284,6 +1468,7 @@
     }
     function setTime(tt) {
       if (!F.length) return;
+      curT = tt;
       let i = 0; while (i < F.length - 2 && F[i + 1].t <= tt) i++;
       const a = F[i], b = F[i + 1] || a, f = clamp((tt - a.t) / Math.max(1e-6, b.t - a.t), 0, 1);
       const H = a.H.map((v, j) => v + (b.H[j] - v) * f), q = Q.slerp(a.q, b.q, f);
@@ -1294,23 +1479,42 @@
       ghosts.forEach(g => { g.visible = g.userData.i <= cur; });
       dots.forEach(d => { d.visible = d.userData.i <= cur; });
       if (peakM) peakM.visible = tt >= -0.002;
+      // ball
+      if (flight && ballM) {
+        const on = tt >= 0 && flight.res !== 'back';
+        ballM.visible = on; ballSh.visible = on;
+        if (!on) { pathL.geometry.setDrawRange(0, 0); if (ringM) ringM.visible = false; }
+        else {
+          const ts = flight.ts; let k = 0; while (k < ts.length - 2 && ts[k + 1] <= tt) k++;
+          const p0 = flight.pts[k], p1 = flight.pts[k + 1] || p0, fr = clamp((tt - ts[k]) / Math.max(1e-6, (ts[k + 1] || ts[k] + 1) - ts[k]), 0, 1);
+          const P = [p0[0] + (p1[0] - p0[0]) * fr, p0[1] + (p1[1] - p0[1]) * fr, p0[2] + (p1[2] - p0[2]) * fr];
+          ballM.position.set(P[0], P[1], P[2]); ballSh.position.set(P[0], 0.006, P[2]);
+          pathL.geometry.setDrawRange(0, k + 2);
+          if (ringM) ringM.visible = tt >= flight.tEnd - 1e-3;
+        }
+      }
     }
-    function render() { if (!renderer) return; camUpdate(); renderer.render(scene, camera); }
+    function render() {
+      if (!renderer) return; camUpdate();
+      if (ballM) { const k = clamp(camera.position.distanceTo(ballM.position) / 3, 1, 3.2); ballM.scale.setScalar(k); ballSh.scale.setScalar(k); }
+      renderer.render(scene, camera);
+    }
     function unmount() {
       mountId++;
       if (detach) detach(); detach = null; if (ro) ro.disconnect(); ro = null;
       if (scene) scene.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => m.dispose()); });
       if (renderer) { renderer.dispose(); try { renderer.forceContextLoss(); } catch (e) { /* ignore */ } }
-      renderer = null; scene = null; F = []; ghosts = []; dots = []; swingGrp = null; orbit = null;
+      renderer = null; scene = null; F = []; ghosts = []; dots = []; swingGrp = null; orbit = null; views = null; onManual = null;
     }
     return {
       mount, unmount, setTime, render,
       rebuild() { if (renderer) buildSwing(); },
-      resetView() { if (home) orbit = { target: home.target.clone(), az: home.az, pol: home.pol, r: home.r }; },
+      setView(m) { camMode = m; },
+      resetView() { camMode = 'auto'; },
+      set onManual(fn) { onManual = fn; },
       snapshot() { if (!renderer) return null; render(); try { return renderer.domElement.toDataURL('image/png'); } catch (e) { return null; } }
     };
   })();
-
 
   /* ---------- workouts ---------- */
   const allWorkouts = () => PRESETS.concat(S.workouts);
@@ -1481,6 +1685,10 @@
         if (left <= 0) blockDone();
         else if (left === 3 && b.reps >= 6) Coach.say('Tiga lagi!', 'Three more!');
       }
+    }, why => {
+      if (!active()) return;
+      const nx = $('#bNext'); nx.textContent = REJECT_TXT[why]; nx.classList.add('warn');
+      clearTimeout(st.cueT); st.cueT = setTimeout(() => { nx.classList.remove('warn'); nx.textContent = nextLabel(st.bi + 1); }, 2600);
     });
     const unsub = Motion.sub(s => det.feed(s));
     const iv = setInterval(() => {
@@ -1511,7 +1719,7 @@
       if (!st.paused) { st.paused = true; st.pauseAt = now(); Coach.stop(); btn.textContent = 'Lanjut lagi'; btn.className = 'btn teal'; }
       else { const d = now() - st.pauseAt; st.bStart += d; st.pausedMs += d; st.paused = false; btn.textContent = 'Jeda dulu'; btn.className = 'btn line'; }
     };
-    cleanup = () => { unsub(); clearInterval(iv); Wake.off(); Coach.stop(); };
+    cleanup = () => { unsub(); clearInterval(iv); clearTimeout(st.cueT); Wake.off(); Coach.stop(); };
     Object.assign(actions, {
       pause: pauseToggle,
       end: () => { if (!st.paused) pauseToggle(); dialog('Udahan latihannya?', 'Ayunan yang udah masuk tetep kecatet kok.', [{ label: 'Lanjut', kind: 'teal', fn: () => { if (st.paused) pauseToggle(); } }, { label: 'Udahan', kind: 'danger', fn: () => finish(false) }]); },
@@ -1925,34 +2133,42 @@
       ${subhdr('Tes sensor')}
       <p class="sub center" id="sStat"></p>
       <div class="card" style="padding:12px 12px 16px">
-        <div class="gauge-wrap">${gaugeSVG()}<div class="gauge-num"><div class="n"><span id="sR">0</span></div><span class="u">${U()} raket (live)</span><span class="r"><b id="sW">0</b> °/detik</span></div></div>
+        <div class="gauge-wrap">${gaugeSVG()}<div class="gauge-num"><div class="n"><span id="sR">0</span></div><span class="u">${U()} raket, arah maju</span><span class="r">putaran total <b id="sW">0</b> °/dtk</span></div></div>
       </div>
       <div class="list">
+        <div class="row"><span class="k">${ICON.target}Kalibrasi arah</span><span class="vs" id="sCal">–</span></div>
+        <div class="row"><span class="k">${ICON.swing}Ayunan kehitung</span><span class="v" id="sN">0</span></div>
+        <div class="row"><span class="k">${ICON.x}Ditolak</span><span class="vs" id="sRej">–</span></div>
         <div class="row"><span class="k">${ICON.boltL}Raket tercepat</span><span class="v or" id="sM">0</span></div>
-        <div class="row"><span class="k">${ICON.swing}Ayunan kedeteksi</span><span class="v" id="sN">0</span></div>
         <div class="row"><span class="k">${ICON.sensor}Orientasi α / β / γ</span><span class="vs num" id="sO">–</span></div>
       </div>
-      <p class="note">Ayunin HP pelan, terus kencang. Bunyi = ayunan kehitung dengan sensitivitas sekarang (garis di speedometer). Kalau angkanya diam aja, sensor nggak kebaca di browser ini.</p>
+      <p class="note">Pegang HP kayak raket (layar = muka raket). Ayun maju: speedometer naik dan bunyi kalau kehitung. Tarik ke belakang (ancang-ancang) atau puter pergelangan: speedometer diam dan nggak bunyi. Kalau kalibrasi arah belum kekunci, gerak-gerakin HP pelan ke segala arah beberapa detik.</p>
       <div class="grow"></div>
       ${simBtn()}
-      <button class="btn line" data-act="reset">Reset angka</button>
+      <div class="row-btns"><button class="btn line small" data-act="recal">Kalibrasi ulang</button><button class="btn line small" data-act="reset">Reset angka</button></div>
     </section>`;
-    let mx = 0, n = 0, curW = 0, raf = 0;
+    let mx = 0, n = 0, rj = 0, curH = 0, curW = 0, raf = 0;
     gaugeTh();
     const live = $('#gLive');
-    const det = new Detector(thr, pk => Snd.hit(pk / 22), pk => { n++; $('#sN').textContent = n; gaugeLast(ballOf(racketKmh(pk))); });
-    const unsub = Motion.sub(s => { det.feed(s); curW = Math.max(curW, s.w); mx = Math.max(mx, racketKmh(s.w)); });
+    const det = new Detector(thr, pk => Snd.hit(pk / 22), pk => { n++; mx = Math.max(mx, racketKmh(pk)); $('#sN').textContent = n; gaugeLast(ballOf(racketKmh(pk))); },
+      why => { rj++; $('#sRej').textContent = `${rj} · ${why === 'short' ? 'kependekan' : 'muter pergelangan'}`; });
+    const unsub = Motion.sub(s => { det.feed(s); curH = Math.max(curH, s.h); curW = Math.max(curW, s.w); });
     const loop = () => {
-      const c = curW; curW *= 0.85;
-      $('#sW').textContent = Math.round(c / DEG); $('#sR').textContent = fv(racketKmh(c)); $('#sM').textContent = fv(mx) + ' ' + U();
-      const pc = clamp(ballOf(racketKmh(c)) / GMAX * 100, 0, 100); live.setAttribute('stroke-dasharray', `${pc.toFixed(1)} 100`); live.style.opacity = pc < 1.5 ? 0 : 1;
+      const h = curH, w = curW; curH *= 0.85; curW *= 0.85;
+      $('#sW').textContent = Math.round(w / DEG); $('#sR').textContent = fv(racketKmh(Math.max(0, h))); $('#sM').textContent = fv(mx) + ' ' + U();
+      const pc = clamp(ballOf(racketKmh(Math.max(0, h))) / GMAX * 100, 0, 100); live.setAttribute('stroke-dasharray', `${pc.toFixed(1)} 100`); live.style.opacity = pc < 1.5 ? 0 : 1;
       const o = Motion.lastOri(); $('#sO').textContent = o ? `${Math.round(o.a)}° / ${Math.round(o.b)}° / ${Math.round(o.g)}°` : (Motion.isSim() ? 'simulasi' : '–');
+      const c = Motion.calStatus(); $('#sCal').textContent = Motion.isSim() ? 'simulasi' : c.locked ? 'Kekunci ✓' : `Lagi kalibrasi… ${Math.min(99, Math.round(c.n / 40 * 100))}%`;
       $('#sStat').textContent = Motion.isSim() ? 'Mode simulasi: sensor gerak nggak ketemu di perangkat ini.' : `Giroskop aktif · ${Math.round(Motion.rate())} Hz`;
       raf = requestAnimationFrame(loop);
     };
     loop(); Wake.on();
     cleanup = () => { unsub(); cancelAnimationFrame(raf); Wake.off(); };
-    actions = { back: () => go('settings'), reset: () => { mx = 0; n = 0; $('#sN').textContent = 0; const g = $('#gLast'); if (g) g.setAttribute('visibility', 'hidden'); }, sim: () => Motion.simSwing() };
+    actions = {
+      back: () => go('settings'), sim: () => Motion.simSwing(),
+      recal: () => { Motion.recalibrate(); toast('Kalibrasi diulang. Gerak-gerakin HP pelan ke segala arah.'); },
+      reset: () => { mx = 0; n = 0; rj = 0; $('#sN').textContent = 0; $('#sRej').textContent = '–'; const g = $('#gLast'); if (g) g.setAttribute('visibility', 'hidden'); }
+    };
   };
 
   /* example data for the design preview (labelled there) */

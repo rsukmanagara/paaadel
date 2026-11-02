@@ -21,6 +21,15 @@ Web app (PWA) buat latihan shadow swing padel pakai sensor gerak HP. Pegang HP k
 3. Biar kayak aplikasi: Share → **Add to Home Screen**. Bisa dipakai offline juga.
 4. Nyalain volume media (bunyi "pok" keluar dari speaker).
 
+## Cara ayunan dideteksi
+- Yang dihitung cuma **ayunan maju dengan layar HP (muka raket) di depan**: putaran di sumbu lebar layar, arah positif.
+- **Ancang-ancang** (raket ditarik ke belakang) arahnya kebalikan, jadi nggak pernah dihitung.
+- **Ayunan pendek** (sapuan < 15/25/35° untuk Santai/Sedang/Kenceng) dan **muter pergelangan** (putaran di sumbu panjang HP) ditolak tanpa bunyi, dan aplikasinya ngasih tahu alasannya.
+- Urutan sumbu giroskop beda antara iPhone dan Android, jadi PAAADEL mengkalibrasi sendiri dengan membandingkan giroskop dan sensor orientasi beberapa detik pertama (cek di Pengaturan → Tes sensor).
+
+## Arah bola (Analisis 3D)
+Setelah titik kena, bola diluncurkan dari perkiraan arah muka raket (70%) dan arah ayunan (30%) dengan kecepatan bola ≈, lalu dihitung lintasannya (gravitasi + hambatan udara): masuk, nyangkut net, kepanjangan, atau melebar. Kamera bisa Auto, Ayunan, Samping (buat lihat sudut muka raket), atau Lapangan.
+
 ## Kecepatan
 Kecepatan raket = kecepatan putar giroskop × tuas 0,62 m. Kecepatan bola ≈ raket × 1,35. Buat bandingin progres sendiri, bukan pengganti radar; bisa dikalibrasi di Pengaturan.
 
