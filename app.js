@@ -12,15 +12,16 @@
   const PREVIEW = !!window.PALA_PREVIEW; // design preview page: no sensors, simulated swings only
 
   /* ===================== constants ===================== */
-  const VERSION = '1.0';
-  const LEVER = 0.62;          // m — rotation centre to racket sweet spot (effective)
+  const VERSION = '1.1';
+  const LEVER = 0.62;          // m — gyro-only fallback: rotation centre to racket sweet spot (effective)
+  const R_HEAD = 0.32;         // m — hand (phone) to the centre of the racket head
   const BALL_RATIO = 1.35;     // padel ball off the sweet spot vs racket-head speed
   const GYRO_MAX = 34.4;       // rad/s (~1970 °/s) — most phone gyros clip at 2000 °/s
   const GMAX = 100;            // gauge full scale, km/h ball
   const SENS = {
-    light: { label: 'Santai', w: 5 },
-    medium: { label: 'Sedang', w: 7 },
-    full: { label: 'Kenceng', w: 10 }
+    light: { label: 'Santai', w: 5.5 },
+    medium: { label: 'Sedang', w: 8 },
+    full: { label: 'Kenceng', w: 11 }
   };
   const STROKES = {
     FH: { n: 'Forehand', en: 'Forehand', d: 'Pukulan sisi forehand' },
@@ -100,7 +101,7 @@
     goal: 20, sound: true, soundKind: 'pop', dynamic: true, vibrate: true,
     coach: true, coachLang: 'id', unit: 'kmh', sens: 'medium', fine: 1, hand: 'R', calib: 1,
     autolock: true, seenHowTo: false, theme: 'auto', axis: null, zone: { on: false, min: 35, max: 48, preset: 'kontrol' },
-    look: { racket: 'classic', ribbon: true, ribbonColor: 'speed', ribbonWidth: 'face', ghosts: true, ghostDensity: 'normal', peak: true, dots: false }
+    look: { racket: 'classic', ribbon: true, ghosts: true, ghostDensity: 'normal', peak: true, dots: true, arrow: false }
   };
   function load(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }
   function store(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } }
@@ -108,6 +109,7 @@
   const prevLook = (S.settings && S.settings.look) || {}, prevZone = (S.settings && S.settings.zone) || {};
   S.settings = Object.assign({}, DEFAULTS, S.settings || {});
   S.settings.look = Object.assign({}, DEFAULTS.look, prevLook);
+  if ('ribbonWidth' in prevLook) { S.settings.look.dots = true; delete S.settings.look.ribbonWidth; delete S.settings.look.ribbonColor; } // 1.0 → 1.1 replay look
   S.settings.zone = Object.assign({}, DEFAULTS.zone, prevZone);
   S.days = S.days || {};
   S.sessions = S.sessions || [];
@@ -348,10 +350,12 @@
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && Wake.want) Wake.on(); });
 
   /* ===================== motion sensors ===================== */
-  /* Device frame: x across the screen, y along the phone (= racket axis, top = tip), z out of the screen (= string face).
-     A real stroke rotates the phone about x with the screen leading (ωx > 0); a backswing is ωx < 0; a wrist twist is ωy.
+  /* Device frame: x across the screen, y along the phone (= racket axis, top = tip), z out of the screen (= forehand face).
+     The racket head (on +y) moves with ω × y = (−ωz, 0, ωx): a forehand drives it towards +z (screen leading), a backhand
+     towards −z (back of the phone leading); a wrist twist is ωy and does not move the head.
      rotationRate axis naming differs between engines (W3C: x=beta, y=gamma, z=alpha; WebKit/iOS reports x=alpha, y=beta,
-     z=gamma), so the mapping is learned by comparing the gyro with the rotation seen in the orientation stream. */
+     z=gamma), so the mapping is learned by comparing the gyro with the rotation seen in the orientation stream.
+     Linear acceleration (device frame) is kept for the hand-speed part; its sign convention is checked against gravity. */
   const PERMS = [[1, 2, 0], [0, 1, 2], [0, 2, 1], [1, 0, 2], [2, 0, 1], [2, 1, 0]];
   const AXMAPS = [];
   PERMS.forEach(p => { for (let sb = 0; sb < 8; sb++) AXMAPS.push({ p, s: [sb & 1 ? -1 : 1, sb & 2 ? -1 : 1, sb & 4 ? -1 : 1] }); });
@@ -365,33 +369,50 @@
     let mapIdx = DEFAULT_MAP, locked = false, oriW = null, prevOri = null, gAcc = [0, 0, 0], gN = 0;
     const cal = { err: new Float64Array(AXMAPS.length), n: 0, mag: 0 };
     if (set.axis && set.axis.ua === ua && AXMAPS[set.axis.i]) { mapIdx = set.axis.i; locked = true; }
-    function recalibrate() { cal.err.fill(0); cal.n = 0; cal.mag = 0; locked = false; mapIdx = DEFAULT_MAP; set.axis = null; persist(true); }
+    // accelerometer sign: spec says a phone lying screen-up reads +9.81 on z (including gravity); some engines flip it
+    let aSign = set.accSign && set.accSign.ua === ua ? set.accSign.s : 1, aSum = 0, aN = set.accSign && set.accSign.ua === ua ? 99 : 0;
+    let raw = null; // raw event log for the sensor page export
+    function recalibrate() { cal.err.fill(0); cal.n = 0; cal.mag = 0; locked = false; mapIdx = DEFAULT_MAP; set.axis = null; aSum = 0; aN = 0; set.accSign = null; persist(true); }
     function emit(s) {
       buf.push(s); const cut = s.t - 6000; while (buf.length && buf[0].t < cut) buf.shift();
       lastT = s.t; subs.forEach(f => { try { f(s); } catch (e) { console.error(e); } });
     }
-    // s.h = face-leading rotation (rad/s, + = forward stroke); s.perp = rotation that actually moves the racket head
-    function emitDev(t, v, mag, sat) { emit({ t, w: mag, wx: v[0], wy: v[1], wz: v[2], h: v[0], perp: Math.hypot(v[0], v[2]), sat }); }
+    // s.perp = rotation that moves the racket head (rad/s); s.h kept for old callers; s.acc = linear acceleration (m/s², device frame) or null
+    function emitDev(t, v, mag, sat, acc = null) { emit({ t, w: mag, wx: v[0], wy: v[1], wz: v[2], h: v[0], perp: Math.hypot(v[0], v[2]), sat, acc }); }
     function pushOri(t, q) { obuf.push({ t, q }); const cut = t - 6000; while (obuf.length && obuf[0].t < cut) obuf.shift(); }
+    const v3 = o => o && o.x != null && isFinite(o.x) ? [+o.x || 0, +o.y || 0, +o.z || 0] : null;
     function onMotion(e) {
       const r = e.rotationRate; if (!r || (r.alpha == null && r.beta == null && r.gamma == null)) return;
       const t = now(); nEv++;
       if (lastT && !sim) { const dt = t - lastT; if (dt > 0 && dt < 250) rate = rate ? rate * 0.95 + (1000 / dt) * 0.05 : 1000 / dt; }
       if (firstCb) { const f = firstCb; firstCb = null; f(); }
       if (sim) return;
-      const raw = [(+r.alpha || 0) * DEG, (+r.beta || 0) * DEG, (+r.gamma || 0) * DEG];
-      gAcc[0] += raw[0]; gAcc[1] += raw[1]; gAcc[2] += raw[2]; gN++;
+      const rw = [(+r.alpha || 0) * DEG, (+r.beta || 0) * DEG, (+r.gamma || 0) * DEG];
+      gAcc[0] += rw[0]; gAcc[1] += rw[1]; gAcc[2] += rw[2]; gN++;
       // until the axis map is confirmed: direction from the orientation stream, size always from the gyro
       // (an orientation glitch can then never create a fake fast swing)
-      const mag = Math.hypot(raw[0], raw[1], raw[2]);
-      let v = mapRaw(mapIdx, raw);
+      const mag = Math.hypot(rw[0], rw[1], rw[2]);
+      let v = mapRaw(mapIdx, rw);
       if (!locked && oriW && t - oriW.t < 80) { const om = Math.hypot(oriW.v[0], oriW.v[1], oriW.v[2]); if (om > 0.05 && om < 2 * mag + 2) v = oriW.v.map(c => c / om * mag); }
-      emitDev(t, v, mag, Math.max(Math.abs(raw[0]), Math.abs(raw[1]), Math.abs(raw[2])) >= GYRO_MAX);
+      // acceleration
+      const lin = v3(e.acceleration), aig = v3(e.accelerationIncludingGravity);
+      if (aig && prevOri && aN < 40 && mag < 0.6) { // nearly still: gravity must point along "up"
+        const m = Math.hypot(aig[0], aig[1], aig[2]);
+        if (Math.abs(m - 9.81) < 1.5) {
+          const up = Q.rot(Q.conj(prevOri.q), [0, 0, 1]); aSum += (aig[0] * up[0] + aig[1] * up[1] + aig[2] * up[2]) / m; aN++;
+          if (aN >= 15) { aSign = aSum >= 0 ? 1 : -1; if (aN === 39) { set.accSign = { s: aSign, ua }; persist(); } }
+        }
+      }
+      let acc = lin ? lin.map(c => c * aSign) : null;
+      if (!acc && aig && prevOri && aN >= 15) { const up = Q.rot(Q.conj(prevOri.q), [0, 0, 1]); acc = aig.map((c, i) => c * aSign - 9.81 * up[i]); }
+      if (raw && raw.ev.length < 4000) raw.ev.push([Math.round(t), r.alpha, r.beta, r.gamma, lin && lin[0], lin && lin[1], lin && lin[2], aig && aig[0], aig && aig[1], aig && aig[2], e.interval]);
+      emitDev(t, v, mag, Math.max(Math.abs(rw[0]), Math.abs(rw[1]), Math.abs(rw[2])) >= GYRO_MAX, acc);
     }
     function onOri(e) {
       if (sim || (e.beta == null && e.gamma == null)) return;
       const t = now();
       lastOriE = { a: e.alpha || 0, b: e.beta || 0, g: e.gamma || 0 };
+      if (raw && raw.ori.length < 4000) raw.ori.push([Math.round(t), e.alpha, e.beta, e.gamma, e.absolute ? 1 : 0]);
       const q = Q.euler(lastOriE.a, lastOriE.b, lastOriE.g);
       if (prevOri) {
         const dt = (t - prevOri.t) / 1000;
@@ -462,82 +483,209 @@
       let x = cr(d, n); const l = Math.hypot(x[0], x[1], x[2]) || 1; x = x.map(v => v / l); n = cr(x, d);
       return Q.fromBasis(x, d, n);
     }
+    let simH = null, simTh = -1.9, simTl = 0.35, simPrevT = 0, simRec = null;
     function startSim() {
       if (simTimer) return;
       rate = 60;
       simTimer = setInterval(() => {
-        const t = now(); let hx = (Math.random() - 0.5) * 0.3, theta = -1.9, tilt = 0.35;
+        const t = now(), dt = simPrevT ? clamp((t - simPrevT) / 1000, 0.004, 0.05) : 0.016; simPrevT = t;
+        let theta = simTh, tilt = simTl, S1 = 0;
         if (simSw) {
           const u = (t - simSw.t0) / 1000 - 0.5;
-          if (u > 0.9) { simSw = null; }
+          if (u > 0.9) { simSw = null; simRec = { t0: t, th: simTh, tl: simTl }; }
           else {
-            const S1 = 1 / (1 + Math.exp(-u / simSw.tau));
-            theta = -1.9 + simSw.D * S1; tilt = 0.35 - 0.5 * S1 + 0.25 * Math.max(0, S1 - 0.8);
-            hx += simSw.D / simSw.tau * S1 * (1 - S1) - 4 * Math.exp(-Math.pow((u + 0.32) / 0.09, 2)); // forward swing after a backswing
+            S1 = 1 / (1 + Math.exp(-u / simSw.tau));
+            const bk = 0.35 * Math.exp(-Math.pow((u + 0.32) / 0.13, 2)); // small backswing before the stroke
+            const fade = Math.max(0, 1 - (u + 0.5) / 0.4); // start from wherever the racket was
+            theta = -1.9 + simSw.D * S1 - bk + (simSw.th0 + 1.9) * fade; tilt = 0.35 - 0.5 * S1 + 0.25 * Math.max(0, S1 - 0.8) + (simSw.tl0 - 0.35) * fade;
           }
         }
-        pushOri(t, poseQ(theta, tilt, simSw ? simSw.face : 0.15));
-        emitDev(t, [hx, (Math.random() - 0.5) * 0.3, (Math.random() - 0.5) * 0.3], Math.abs(hx) + 0.1, false);
+        if (!simSw && simRec) { // easy way back to the ready position (~1.2 s)
+          const f = clamp((t - simRec.t0) / 1200, 0, 1), e = (1 - Math.cos(Math.PI * f)) / 2;
+          theta = simRec.th + (-1.9 - simRec.th) * e; tilt = simRec.tl + (0.35 - simRec.tl) * e; if (f >= 1) simRec = null;
+        }
+        const hx = (theta - simTh) / dt + (Math.random() - 0.5) * 0.3; simTh = theta; simTl = tilt;
+        const q = poseQ(theta, tilt, simSw ? simSw.face : 0.15);
+        pushOri(t, q);
+        // the hand travels round the body just behind the racket; its acceleration feeds the hand-speed part
+        const ph = theta - 0.3, Hp = [0.48 * Math.cos(ph), 0.48 * Math.sin(ph), 1.0 - 0.3 * (S1 - 0.5) * (simSw ? 1 : 0)];
+        let acc = [0, 0, 0];
+        if (simH) {
+          const v = Hp.map((c, i) => (c - simH.p[i]) / dt), a = simH.v ? v.map((c, i) => (c - simH.v[i]) / dt) : [0, 0, 0];
+          acc = Q.rot(Q.conj(q), a).map(c => c + (Math.random() - 0.5) * 0.08); simH = { p: Hp, v };
+        } else simH = { p: Hp, v: null };
+        emitDev(t, [hx, (Math.random() - 0.5) * 0.3, (Math.random() - 0.5) * 0.3], Math.abs(hx) + 0.1, false, acc);
       }, 16);
     }
     function simSwing(power) {
       if (!sim) return;
-      const D = 4.1 + Math.random() * 0.4, peak = power || (14 + Math.random() * 9);
-      simSw = { t0: now(), D, tau: D / (4 * peak), face: (Math.random() * 30 - 4) * DEG };
+      const D = 4.1 + Math.random() * 0.4, peak = power || (11.5 + Math.random() * 6);
+      simSw = { t0: now(), D, tau: D / (4 * peak), face: (Math.random() * 30 - 4) * DEG, th0: simTh, tl0: simTl }; simRec = null;
     }
     return {
       ensure, sub, samples, oriAt, currentQ, simSwing, recalibrate,
+      rawStart() { raw = { ev: [], ori: [], t0: now() }; },
+      rawStop() { const r = raw; raw = null; return r && { app: 'paaadel', kind: 'sensor-log', version: VERSION, ua: navigator.userAgent, ios: IS_IOS, map: mapIdx, locked, accSign: aSign, accChecks: aN, cols: { ev: 't,alpha,beta,gamma,ax,ay,az,gx,gy,gz,interval', ori: 't,alpha,beta,gamma,absolute' }, ev: r.ev, ori: r.ori }; },
+      rawCount: () => raw ? raw.ev.length : 0,
+      accStatus: () => ({ sign: aSign, n: aN, has: buf.length ? !!buf[buf.length - 1].acc : null }),
       calStatus: () => ({ locked: sim || locked, n: cal.n, map: mapIdx }),
       isSim: () => sim, isOn: () => ok || sim, rate: () => rate, lastT: () => lastT, lastOri: () => lastOriE, events: () => nEv
     };
   })();
 
-  /* swing detector on the face-leading rotation:
-     - a swing opens when the forward rotation crosses the threshold (backswings are negative and never open one)
-     - at the first drop off the peak (≈ contact) it must have swept enough angle and be mostly face-leading,
-       otherwise it is a short flick or a wrist twist and is rejected without sound
-     - closes when the forward rotation dies down; short cool-down against double counts */
-  const MIN_SWEEP = { light: 15, medium: 25, full: 35 }; // degrees of forward rotation from the start of the stroke to its peak
+  /* ===================== swing detection ===================== */
+  /* Works on the racket-head rotation (perp = |ω × y|), so a forehand (screen leading) and a backhand (back leading)
+     count the same way.
+     - a "push" = the racket head moving one way; it ends when the head slows down or turns back
+     - a push counts when it is fast enough (sensitivity), turns the head through a real angle (not a flick) and is not
+       mostly a wrist twist
+     - take-back vs stroke: a take-back is followed by a stronger push the other way. A stroke that comes straight out of
+       a weaker opposite push (take-back → swing) counts at once; a lone push waits ~0.2–0.4 s to see what follows.
+     - after a few strokes the detector knows which way "forward" is (towards the net) and ignores pushes going
+       backwards — take-backs and the way back to the ready position — even with a pause before the swing. */
+  const MIN_SWEEP = { light: 18, medium: 28, full: 38 }; // degrees the racket head turns in one push
   const sweepMin = () => MIN_SWEEP[set.sens] * set.fine * DEG;
+  const LOBE_ON = 1.5, LOBE_OFF = 0.6; // rad/s
+  // horizontal (earth) direction the racket head travels at this sample, or null when mostly vertical / unknown
+  function headHeading(s) {
+    const q = Motion.oriAt(s.t); if (!q) return null;
+    const v = Q.rot(q, [-s.wz, 0, s.wx]), hz = Math.hypot(v[0], v[1]);
+    return hz > 0.5 && hz > 0.35 * Math.hypot(v[0], v[1], v[2]) ? [v[0] / hz, v[1] / hz] : null;
+  }
   class Detector {
-    constructor(getT, onHit, onSwing, onReject) {
-      this.getT = getT; this.onHit = onHit; this.onSwing = onSwing; this.onReject = onReject;
-      this.state = 'idle'; this.lobe = false; this.sweep = 0; this.lastT = 0;
-    }
-    check() {
-      const s = this.peakS, total = Math.max(s.w, Math.hypot(s.wx, s.wy, s.wz));
-      if (this.peakSweep < sweepMin()) return 'short';
-      if (s.h < 0.5 * total) return 'twist';
-      return null;
+    // o: { getT() → threshold rad/s, onStroke(push), onReject(why, push), onLobe(push) — every fast push, counted or not }
+    constructor(o) { Object.assign(this, o); this.L = null; this.prev = null; this.cand = null; this.lastFire = -1e9; this.lastT = 0; this.fwd = [0, 0]; this.fwdW = 0; this.backN = 0; this.backT = 0; }
+    opp(a, b) { return a.dx * b.dx + a.dz * b.dz < -0.3; }
+    fwdScore(h) {
+      if (!h || this.fwdW < 1.8) return null;
+      const m = Math.hypot(this.fwd[0], this.fwd[1]); if (m < 0.6 * this.fwdW) return null;
+      return (h[0] * this.fwd[0] + h[1] * this.fwd[1]) / m;
     }
     feed(s) {
-      const T = this.getT(), t = s.t, h = s.h, dt = this.lastT ? clamp((t - this.lastT) / 1000, 0, 0.05) : 0;
-      this.lastT = t;
-      if (h > 1.2) { if (!this.lobe) { this.lobe = true; this.sweep = 0; } this.sweep += h * dt; }
-      else if (h < 0.4) this.lobe = false;
-      if (this.state === 'idle') {
-        if (this.lobe && h >= T) { this.state = 'rise'; this.peak = h; this.peakT = t; this.peakS = s; this.peakSweep = this.sweep; this.t0 = t; this.fired = false; this.bad = null; }
-      } else if (this.state === 'rise') {
-        if (h > this.peak) { this.peak = h; this.peakT = t; this.peakS = s; this.peakSweep = this.sweep; }
-        else if (!this.fired && !this.bad && h < this.peak * 0.9) {
-          this.bad = this.check();
-          if (!this.bad) { this.fired = true; this.onHit && this.onHit(this.peakS.perp, this.peakT, this.peakS); }
-        }
-        if (h < T * 0.4 || !this.lobe || t - this.t0 > 700) {
-          if (!this.fired && !this.bad) { this.bad = this.check(); if (!this.bad) { this.fired = true; this.onHit && this.onHit(this.peakS.perp, this.peakT, this.peakS); } }
-          if (this.fired) this.onSwing && this.onSwing(this.peakS.perp, this.peakT, this.peakS);
-          else if (this.bad) this.onReject && this.onReject(this.bad, this.peakS);
-          this.state = 'cool'; this.coolUntil = t + 150; this.coolStart = t;
-        }
-      } else if (this.state === 'cool') {
-        if ((t >= this.coolUntil && h < T * 0.5) || t - this.coolStart > 1500) this.state = 'idle';
+      const t = s.t, dt = this.lastT ? clamp((t - this.lastT) / 1000, 0, 0.05) : 0; this.lastT = t;
+      const p = s.perp, vx = -s.wz, vz = s.wx;
+      let L = this.L;
+      if (L && (p < LOBE_OFF || (p > LOBE_ON && vx * L.dx + vz * L.dz < -0.3 * p))) { this.close(t); L = null; }
+      if (!L && p > LOBE_ON) L = this.L = { t0: t, t1: t, peak: p, peakT: t, peakS: s, dx: vx / p, dz: vz / p, sweep: 0, twist: 0, past: false, prev: this.prev, sat: false };
+      if (L) {
+        L.sweep += p * dt; L.twist += Math.abs(s.wy) * dt; L.t1 = t; if (s.sat) L.sat = true;
+        if (p > L.peak) { L.peak = p; L.peakT = t; L.peakS = s; L.dx = vx / p; L.dz = vz / p; }
+        if (!L.past && L.peak >= this.getT() && p < 0.85 * L.peak) { L.past = true; this.atPeak(L); }
       }
+      const c = this.cand;
+      if (c && t >= c.due) {
+        const o = this.L; // a push the other way is still building: let it finish first
+        if (!(o && o !== c && this.opp(c, o) && o.t0 - c.t1 < 600 && o.peak > 0.5 * c.peak && t - c.t1 < 1000)) { this.cand = null; this.fire(c); }
+      }
+    }
+    atPeak(L) { // just past the fastest moment: count right away only if it already looks like a full stroke
+      if (L.sweep < sweepMin() || L.t1 - L.t0 < 50 || L.twist > 1.5 * L.sweep) return;
+      L.head = headHeading(L.peakS);
+      const f = this.fwdScore(L.head);
+      if (f != null && f < 0) return; // going backwards: decided when the push ends
+      const P = L.prev, takeback = P && !P.fired && P.peak > 0.2 * L.peak && P.peak <= 1.1 * L.peak && this.opp(P, L) && L.t0 - P.t1 < 350;
+      if (takeback || (f != null && f > 0.5)) {
+        const c = this.cand; this.cand = null;
+        if (c && c !== P) this.fire(c);
+        L.early = true; this.fire(L);
+      }
+    }
+    close(t) {
+      const L = this.L, T = this.getT(); this.L = null;
+      if (L.peak >= T) { if (!L.head) L.head = headHeading(L.peakS); this.onLobe && this.onLobe(L); }
+      const c = this.cand;
+      if (L.fired) { this.prev = L; return; }
+      if (L.peak < T) { // slow push: the way back after a waiting stroke confirms it
+        if (c && this.opp(c, L) && L.t0 - c.t1 < 600 && L.peak > 0.3 * c.peak) { this.cand = null; this.fire(c); }
+        this.prev = L; return;
+      }
+      L.bad = L.sweep < sweepMin() ? 'short' : L.twist > 1.5 * L.sweep ? 'twist' : null;
+      const f = this.fwdScore(L.head);
+      if (!L.bad && f != null && f < -0.3) L.bad = 'back';
+      if (c) {
+        if (this.opp(c, L) && L.t0 - c.t1 < 600) {
+          if (!L.bad && L.peak >= 0.9 * c.peak) this.cand = null;          // c was the take-back for this one
+          else { this.cand = null; this.fire(c); this.prev = L; return; }   // L is the way back after c
+        } else { this.cand = null; this.fire(c); }
+      }
+      const P = L.prev;
+      if (P && P.fired && this.opp(P, L) && L.t0 - P.t1 < 350) { this.prev = L; return; } // straight back out of a counted stroke
+      if (L.bad) { this.reject(L); this.prev = L; return; }
+      L.due = t + (L.peak >= 1.6 * T ? 200 : 380);
+      this.cand = L; this.prev = L;
+    }
+    reject(L) {
+      if (L.bad === 'back') { // take-back / recovery. Many big ones in a row = the player turned around: relearn "forward"
+        if (L.peak > 1.3 * this.getT()) { this.backN = L.t0 - this.backT < 8000 ? this.backN + 1 : 1; this.backT = L.t0; if (this.backN >= 3) { this.fwd = [0, 0]; this.fwdW = 0; this.backN = 0; } }
+        return;
+      }
+      if (Math.abs(L.peakT - this.lastFire) < 900) return; // part of a counted stroke
+      this.onReject && this.onReject(L.bad, L);
+    }
+    fire(L) {
+      if (L.fired) return; L.fired = true;
+      if (L.peakT - this.lastFire < 400) return;
+      this.lastFire = L.peakT; this.backN = 0;
+      if (!L.head) L.head = headHeading(L.peakS);
+      if (window.__detLog) window.__detLog.push({ peak: +L.peak.toFixed(2), sweep: Math.round(L.sweep / DEG), twist: Math.round(L.twist / DEG), early: !!L.early, dur: Math.round(L.t1 - L.t0), f: this.fwdScore(L.head) });
+      if (L.head) { const w = L.early || L.peak >= 1.3 * this.getT() ? 1 : 0.6; this.fwd = [this.fwd[0] * 0.85 + L.head[0] * w, this.fwd[1] * 0.85 + L.head[1] * w]; this.fwdW = this.fwdW * 0.85 + w; }
+      this.onStroke && this.onStroke(L);
     }
   }
   const REJECT_TXT = {
-    short: 'Ayunannya kependekan. Tarik dari belakang, terus ayun maju lebih panjang.',
-    twist: 'Kebanyakan muter pergelangan. Pastikan layar HP ngadep ke arah pukulan.'
+    short: 'Ayunannya kependekan. Tarik dari belakang, terus ayun lebih panjang.',
+    twist: 'Kebanyakan muter pergelangan. Ayun pakai lengan, layar HP = muka raket.'
   };
+
+  /* ===================== racket-head speed = hand speed + whip ===================== */
+  /* hand: linear acceleration rotated to the earth frame and integrated; the velocity is pinned to zero wherever the
+     phone is momentarily still (ready position, end of the follow-through), which removes the drift.
+     whip: ω × (racket head 32 cm past the hand). Without a working accelerometer: ω × 62 cm (gyro only). */
+  function quatsFor(ms) {
+    const qs = ms.map(s => Motion.oriAt(s.t));
+    return qs.some(q => !q) ? { qs: integrateGyro(ms), src: 'gyro' } : { qs, src: 'ori' };
+  }
+  function solveKin(ms, qs, twoSided) {
+    const n = ms.length; let nAcc = 0, maxA = 0;
+    ms.forEach(s => { if (s.acc) { nAcc++; maxA = Math.max(maxA, Math.hypot(s.acc[0], s.acc[1], s.acc[2])); } });
+    const useHand = n > 4 && nAcc >= 0.9 * n && maxA > 1.0, R = useHand ? R_HEAD : LEVER;
+    const whipOf = R => ms.map((s, i) => Q.rot(qs[i], [-s.wz * R, 0, s.wx * R])), whip = whipOf(R);
+    const gyroOnly = () => { const w = whipOf(LEVER); return { vh: w, spd: w.map(v => Math.hypot(v[0], v[1], v[2])), p: null, hand: false }; };
+    if (!useHand) return gyroOnly();
+    const aw = []; let last = [0, 0, 0];
+    ms.forEach((s, i) => { if (s.acc) last = Q.rot(qs[i], s.acc); aw.push(last); });
+    const qv = ms.map((s, i) => Math.hypot(s.wx, s.wy, s.wz) + 0.4 * Math.hypot(aw[i][0], aw[i][1], aw[i][2]));
+    const quiet = i => (qv[Math.max(0, i - 1)] + qv[i] + qv[Math.min(n - 1, i + 1)]) / 3 < 1.2;
+    const dtOf = i => clamp((ms[i].t - ms[i - 1].t) / 1000, 0, 0.05);
+    const v = ms.map(() => [0, 0, 0]);
+    const seg = (a, b) => { // non-still samples strictly between still samples a and b (−1 / n = no anchor)
+      if (a >= 0) {
+        const end = Math.min(b, n - 1), dur = (ms[end].t - ms[a].t) / 1000, tau = b < n ? 0 : (twoSided || dur > 1.2 ? 1.0 : 0);
+        for (let i = a + 1; i <= end; i++) { const dt = dtOf(i), k = tau ? Math.exp(-dt / tau) : 1; v[i] = [0, 1, 2].map(c => v[i - 1][c] * k + (aw[i - 1][c] + aw[i][c]) / 2 * dt); }
+        if (b < n) { const ve = v[b].slice(), T0 = ms[a].t, T1 = ms[b].t; for (let i = a; i <= b; i++) { const f = (ms[i].t - T0) / Math.max(1e-6, T1 - T0); v[i] = v[i].map((c, ci) => c - ve[ci] * f); } }
+      } else if (b < n) {
+        for (let i = b - 1; i >= 0; i--) { const dt = dtOf(i + 1), k = Math.exp(-dt / 0.6); v[i] = [0, 1, 2].map(c => v[i + 1][c] * k - (aw[i][c] + aw[i + 1][c]) / 2 * dt); }
+      } else {
+        for (let i = 1; i < n; i++) { const dt = dtOf(i), k = Math.exp(-dt / 0.6); v[i] = [0, 1, 2].map(c => v[i - 1][c] * k + (aw[i - 1][c] + aw[i][c]) / 2 * dt); }
+      }
+    };
+    let a = -1;
+    for (let i = 0; i < n; i++) if (quiet(i)) { if (i - a > 1) seg(a, i); v[i] = [0, 0, 0]; a = i; }
+    if (a < n - 1) seg(a, n);
+    let vmax = 0; v.forEach(x => { vmax = Math.max(vmax, Math.hypot(x[0], x[1], x[2])); });
+    if (!(vmax < 16)) return gyroOnly(); // implausible: accelerometer trouble
+    const p = [[0, 0, 0]];
+    for (let i = 1; i < n; i++) { const dt = dtOf(i); p.push([0, 1, 2].map(c => p[i - 1][c] + (v[i - 1][c] + v[i][c]) / 2 * dt)); }
+    const vh = v.map((x, i) => [x[0] + whip[i][0], x[1] + whip[i][1], x[2] + whip[i][2]]);
+    return { vh, spd: vh.map(x => Math.hypot(x[0], x[1], x[2])), p, hand: true };
+  }
+  // racket speed of a counted push, right after it (km/h, calibrated)
+  function strokeSpeed(L) {
+    const ms = Motion.samples(L.peakT - 1800, L.peakT + 300); if (!ms.length) return { kmh: racketKmh(L.peak), sat: L.sat };
+    const { qs } = quatsFor(ms), K = solveKin(ms, qs, false);
+    let best = 0; ms.forEach((s, i) => { if (Math.abs(s.t - L.peakT) <= 90) best = Math.max(best, K.spd[i]); });
+    return { kmh: (best || L.peak * LEVER) * 3.6 * set.calib, sat: L.sat, hand: K.hand };
+  }
 
   /* ===================== screen lock (palm on glass) ===================== */
   const Guard = (() => {
@@ -636,7 +784,7 @@
       <p class="sub">Atur seberapa kenceng ayunan yang dihitung jadi 1 rep.</p>
       <div class="seg" role="group" aria-label="Level sensitivitas">${Object.entries(SENS).map(([k, v]) => `<button data-act="lvl" data-k="${k}" aria-pressed="${set.sens === k}">${v.label}</button>`).join('')}</div>
       <div class="sens-sheet"><input type="range" id="fine" min="0.7" max="1.5" step="0.05" value="${set.fine}" aria-label="Setel halus"><div class="fine"><span>Lebih gampang</span><span id="fineLbl"></span><span>Lebih susah</span></div></div>
-      <p class="note">Yang dihitung cuma ayunan maju (layar HP di depan) yang cukup panjang dan kencang. Ancang-ancang dan muter pergelangan nggak dihitung. Santai cocok buat pemanasan; Kenceng buat yang mau nge-push power.</p>`, {
+      <p class="note">Forehand dan backhand dua-duanya dihitung, asal cukup panjang dan kencang. Ancang-ancang, balik ke posisi siap, dan muter pergelangan nggak dihitung. Santai cocok buat pemanasan; Kenceng buat yang mau nge-push power.</p>`, {
       close: closeOv,
       lvl: b => { set.sens = b.dataset.k; persist(); b.parentElement.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x.dataset.k === set.sens)); upd(); }
     });
@@ -689,7 +837,7 @@
         : '<p class="sub">Belum ada rekor. Ayunan pertamamu bakal jadi patokan.</p>'}
       </div>
       ${needsBackupNudge() ? `<div class="tip"><span class="ic">${ICON.download}</span><span><b>Udah ${totalSwings()} ayunan, backup dulu yuk</b>Biar progresmu aman kalau ganti HP atau data browser kehapus.<span style="display:flex;gap:16px"><button class="link" data-act="backup" style="padding:6px 0 0">Backup sekarang</button><button class="link" data-act="snooze" style="padding:6px 0 0;color:var(--ink-2)">Nanti aja</button></span></span></div>` : ''}
-      ${!S.firstDay && !PREVIEW ? `<div class="tip"><span class="ic">${ICON.hand}</span><span><b>Baru pertama?</b>Pegang HP kayak gagang raket: atas HP = ujung raket, layar = muka raket. Terus gas latihan bebas. <button class="link" data-act="howto" style="padding:4px 0 0">Lihat cara pegang</button></span></div>` : ''}
+      ${!S.firstDay && !PREVIEW ? `<div class="tip"><span class="ic">${ICON.hand}</span><span><b>Baru pertama?</b>Pegang HP kayak gagang raket: atas HP = ujung raket, layar = muka forehand. Terus gas latihan bebas. <button class="link" data-act="howto" style="padding:4px 0 0">Lihat cara pegang</button></span></div>` : ''}
       ${PREVIEW ? `<div class="banner"><b>Ini pratinjau desain.</b> Halaman ini nggak bisa baca sensor gerak, jadi ayunan pakai tombol Simulasi ayunan. Versi https di HP pakai giroskop beneran.${S.firstDay ? '' : ' <button class="link" data-act="seed">Isi data contoh</button>'}</div>`
         : Motion.isSim() ? `<div class="banner"><b>Mode simulasi.</b> Perangkat ini nggak ngirim data sensor gerak. Buka PAAADEL di HP lewat Safari atau Chrome buat latihan beneran.</div>` : ''}
       ${tabbar('home')}
@@ -771,7 +919,7 @@
       <p class="sub center cue" id="cue">Lecutin pergelangan kayak nyambuk. Tiap bunyi = 1 rep.</p>
       <div class="stats3"><div><b id="sN">0</b><small>&nbsp;</small><span>Rep</span></div><div><b class="or" id="sBest">–</b><small id="sBestR">&nbsp;</small><span>Terbaik</span></div><div><b id="sC">–</b><small id="sCs">&nbsp;</small><span id="sCl">Konsisten</span></div></div>
       <div class="strip-card"><div class="strip-head"><span class="label">Riwayat ayunan</span><span class="note" id="stripNote"></span></div><svg class="strip" id="strip" viewBox="0 0 320 64" aria-hidden="true"></svg></div>
-      <div class="hint" id="hint" hidden>${ICON.info}<span><b>Belum bunyi juga?</b>Yang dihitung cuma ayunan maju dengan layar HP di depan, dan harus cukup panjang. Tarik dari belakang, terus lecutin ke depan.</span></div>
+      <div class="hint" id="hint" hidden>${ICON.info}<span><b>Belum bunyi juga?</b>Forehand dan backhand dua-duanya kehitung, asal ayunannya cukup panjang dan kencang. Tarik dari belakang, terus lecutin ke depan. Atas HP = ujung raket.</span></div>
       <div class="grow"></div>
       <div class="s-bottom">${simBtn()}
         <div class="tools"><button class="chip" data-act="sens">${ICON.sliders}<span id="sensChip"></span></button><button class="chip" data-act="zone" id="zoneChip">${ICON.target}Zona: <span id="zoneLbl"></span></button></div>
@@ -804,12 +952,13 @@
       if (sig !== st.zSig) { st.zSig = sig; st.zIn = 0; st.zN = 0; }
       refreshStats();
     }
-    const det = new Detector(thr, pk => Snd.zoneHit(pk / 22, zoneOf(ballOf(racketKmh(pk)))), (pk, pt, ps) => onSwing(pk, ps), why => {
-      const cue = $('#cue'); cue.textContent = REJECT_TXT[why]; cue.className = 'sub center cue warn';
+    const det = new Detector({
+      getT: thr,
+      onStroke: L => { const sp = strokeSpeed(L); Snd.zoneHit(clamp(sp.kmh / 60, 0, 1), zoneOf(ballOf(sp.kmh))); onSwing(sp.kmh, sp.sat); },
+      onReject: why => { const cue = $('#cue'); cue.textContent = REJECT_TXT[why]; cue.className = 'sub center cue warn'; }
     });
-    function onSwing(w, ps) {
-      const sat = !!(ps && ps.sat);
-      const r = racketKmh(w), ball = ballOf(r); st.n++; st.best = Math.max(st.best, r); st.sum += r; st.lastAt = now(); st.balls.push(ball);
+    function onSwing(r, sat) {
+      const ball = ballOf(r); st.n++; st.best = Math.max(st.best, r); st.sum += r; st.lastAt = now(); st.balls.push(ball);
       recordSwing(r, null, true); if (prevBest > 0 && r > prevBest) st.newBest = true;
       const z = zoneOf(ball); if (z) { st.zN++; if (z === 'in') st.zIn++; }
       $('#hint').hidden = true;
@@ -827,7 +976,7 @@
       refreshStats();
       Guard.engage();
     }
-    const unsub = Motion.sub(s => { det.feed(s); mv = Math.max(mv, s.h); });
+    const unsub = Motion.sub(s => { det.feed(s); mv = Math.max(mv, s.perp); });
     const loop = () => { const pc = clamp(ballOf(racketKmh(mv)) / GMAX * 100, 0, 100); live.setAttribute('stroke-dasharray', `${pc.toFixed(1)} 100`); live.style.opacity = pc < 1.5 ? 0 : 1; mv *= 0.86; raf = requestAnimationFrame(loop); };
     loop(); refreshMode();
     const iv = setInterval(() => {
@@ -907,9 +1056,9 @@
       ${subhdr('Cara pegang HP')}
       <div class="card">${HOWTO_ART}</div>
       <ol class="steps">
-        <li><span>Pegang HP kayak gagang raket, pakai grip yang biasa kamu pakai buat pukulan itu. <b>Atas HP = ujung raket</b>, <b>layar = muka raket</b> yang ngadep ke arah pukulan.</span></li>
+        <li><span>Pegang HP kayak gagang raket, pakai grip yang biasa kamu pakai. <b>Atas HP = ujung raket</b>, <b>layar = muka forehand</b>. Backhand otomatis pakai sisi belakang HP, sama kayak raket beneran.</span></li>
         <li><span>Tap mulai, terus ambil posisi siap. Ada bunyi tik, tik, ding: itu tandanya mulai ngerekam.</span></li>
-        <li><span>Ayun maju dan lecutin pergelangan kayak nyambuk. Bunyi "pok" = titik paling kencang. Ancang-ancang, ayunan pendek, dan muter pergelangan sengaja nggak dihitung.</span></li>
+        <li><span>Ayun dan lecutin pergelangan kayak nyambuk. Forehand dan backhand dua-duanya kehitung. Ancang-ancang, balik ke posisi siap, ayunan pendek, dan muter pergelangan sengaja nggak dihitung.</span></li>
         <li><span>Pegang yang kenceng atau pakai tali HP, dan pastiin ada ruang kosong 2 meter di sekitar kamu.</span></li>
       </ol>
       <div class="grow"></div>
@@ -966,30 +1115,40 @@
       <div class="grow"></div>
       <div class="rec">
         <div class="rec-ring" id="ring"><div class="dots" id="dots"><i></i><i></i><i></i></div></div>
-        <h2 class="title" id="recT">Siap-siap…</h2>
-        <p class="sub" id="recS">Ambil posisi ready. Tunggu tik, tik, ding.<br>Atas HP = ujung raket, layar = muka raket.</p>
+        <h2 class="title" id="recT">Ambil posisi ready</h2>
+        <p class="sub" id="recS">Tik, tik, terus ding = mulai rekam.<br>Atas HP = ujung raket, layar = muka forehand.<br>Nggak usah lihat layar.</p>
       </div>
       <div class="grow"></div>
       <div class="s-bottom" id="recBottom">${Motion.isSim() ? '<button class="btn small sim" data-act="sim" id="simBtn" hidden>Simulasi ayunan</button>' : ''}</div>
     </section>`;
-    const timers = [], recStart = Date.now(); let unsub = null, done = false, det = null;
+    const timers = [], recStart = Date.now(); let unsub = null, done = false, det = null, best = null, waiting = false;
     const dots = app.querySelectorAll('#dots i');
     timers.push(setTimeout(() => { Snd.play('tick'); dots[0].classList.add('on'); }, 700), setTimeout(() => { Snd.play('tick'); dots[1].classList.add('on'); }, 1400), setTimeout(startRec, 2100));
     function startRec() {
       Snd.play('ding'); dots[2].classList.add('ding');
       timers.push(setTimeout(() => { const ring = $('#ring'); if (!ring) return; ring.classList.add('live'); ring.innerHTML = '<span class="live-dot"></span>'; }, 250));
       $('#recT').textContent = 'Lagi ngerekam';
-      $('#recS').innerHTML = 'Pukul kapan aja kamu siap.<br>Ancang-ancangnya ikut kerekam kok.';
+      $('#recS').innerHTML = 'Grip kekunci ✓<br>Pukul kapan aja kamu siap.<br>Ancang-ancangnya ikut kerekam kok.';
       const sb = $('#simBtn'); if (sb) sb.hidden = false;
       Guard.engage();
       const T0 = thr() * 0.85;
-      det = new Detector(() => T0, pk => Snd.hit(pk / 22), (pk, pkT) => { if (done) return; done = true; waitCapture(pkT); }, why => { if (!done) $('#recS').textContent = 'Belum kehitung. ' + REJECT_TXT[why]; });
+      // the replay centres on the fastest push around the counted stroke (a take-back is never the fastest)
+      det = new Detector({
+        getT: () => T0,
+        onStroke: L => { if (done) return; if (!best || L.peak > best.peak) best = L; if (!waiting) { waiting = true; Snd.hit(0.7); waitCapture(); } },
+        onLobe: L => { if (!done && best && L.peak > best.peak && L.peakT - best.peakT < 1200) best = L; },
+        onReject: why => { if (!done && !waiting) $('#recS').textContent = 'Belum kehitung. ' + REJECT_TXT[why]; }
+      });
       unsub = Motion.sub(s => det.feed(s));
-      timers.push(setTimeout(() => { if (!done) noSwing(); }, 25000));
+      timers.push(setTimeout(() => { if (!done && !waiting) noSwing(); }, 25000));
     }
-    function waitCapture(pkT) {
+    function waitCapture() {
       $('#recT').textContent = 'Bentar, lagi diolah…'; $('#recS').textContent = 'Lagi nyusun replay 3D-nya.';
-      const check = () => { if (Motion.lastT() >= pkT + 650 || now() > pkT + 1300) capture(pkT); else timers.push(setTimeout(check, 40)); };
+      const check = () => {
+        if (done) return;
+        const pk = best.peakT, settled = Motion.lastT() >= pk + 900 && (!det.L || det.L.peak < best.peak * 0.5);
+        if (settled || now() > pk + 1800) { done = true; capture(pk); } else timers.push(setTimeout(check, 40));
+      };
       check();
     }
     function capture(pkT) {
@@ -1025,35 +1184,45 @@
     }
     return out;
   }
+  /* replay v2: the full wind-up (−2 s) and follow-through (+0.9 s); racket pose from the orientation sensor, hand path
+     from the accelerometer (when the phone has one), racket-head speed = hand + whip. The court is turned so the racket
+     head travels towards the net at contact — true for every stroke, forehand or backhand. */
   function buildReplay(pkT, stroke, hand) {
-    const ms = Motion.samples(pkT - 1250, pkT + 700); if (ms.length < 15) return null;
-    let pi = 0, pw = -1;
-    ms.forEach((s, i) => { if (Math.abs(s.t - pkT) < 90 && s.h > pw) { pw = s.h; pi = i; } });
-    if (pw < 0) return null;
-    const tPk = ms[pi].t;
-    let qs = ms.map(s => Motion.oriAt(s.t)), src = 'ori';
-    if (qs.some(q => !q)) { qs = integrateGyro(ms); src = 'gyro'; }
-    // turn the court so the racket face (screen) points at the net at contact
-    const n = Q.rot(qs[pi], [0, 0, 1]); let hx = n[0], hy = n[1];
-    if (Math.hypot(hx, hy) < 0.35) { const a = Q.rot(qs[Math.max(0, pi - 2)], [0, 1, 0]), b = Q.rot(qs[Math.min(qs.length - 1, pi + 2)], [0, 1, 0]); hx = b[0] - a[0]; hy = b[1] - a[1]; }
+    let ms = Motion.samples(pkT - 2000, pkT + 900); if (ms.length < 20) return null;
+    if (ms.length > 360) { const k = Math.ceil(ms.length / 360); ms = ms.filter((s, i) => i % k === 0 || Math.abs(s.t - pkT) < 120); } // ≤ ~120 Hz stored
+    const { qs, src } = quatsFor(ms), K = solveKin(ms, qs, true);
+    let pi = -1; ms.forEach((s, i) => { if (Math.abs(s.t - pkT) < 160 && (pi < 0 || K.spd[i] > K.spd[pi])) pi = i; });
+    if (pi < 0) return null;
+    const tPk = ms[pi].t, vh = K.vh[pi];
+    let hx = vh[0], hy = vh[1];
+    if (Math.hypot(hx, hy) < 0.25 * Math.hypot(vh[0], vh[1], vh[2])) { const n = Q.rot(qs[pi], [0, 0, 1]); hx = n[0]; hy = n[1]; }
     const qYaw = Q.axis(0, 0, 1, Math.PI / 2 - Math.atan2(hy, hx));
     const qM = Q.axis(1, 0, 0, -Math.PI / 2); // earth (z up, y north) → scene (y up, −z = net)
-    const qw = qs.map(q => Q.norm(Q.mul(qM, Q.mul(qYaw, q))));
+    const qS = Q.mul(qM, qYaw);
+    const qw = qs.map(q => Q.norm(Q.mul(qS, q)));
     for (let i = 1; i < qw.length; i++) { const a = qw[i - 1], b = qw[i]; if (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3] < 0) qw[i] = b.map(c => -c); }
+    // which side of the phone hit: + = screen (forehand face), − = back
+    const nS = Q.rot(qs[pi], [0, 0, 1]), dn = (nS[0] * vh[0] + nS[1] * vh[1] + nS[2] * vh[2]) / (Math.hypot(vh[0], vh[1], vh[2]) || 1);
     const rd = (v, d) => Math.round(v * d) / d;
+    let p = null;
+    if (K.p) { const p0 = K.p[pi]; p = K.p.map(x => Q.rot(qS, [x[0] - p0[0], x[1] - p0[1], x[2] - p0[2]]).map(c => rd(c, 1000))); }
     return {
-      id: 'r' + Date.now().toString(36), date: Date.now(), stroke, hand, k: set.calib, star: false, src,
-      peak: rd(racketKmh(ms[pi].perp), 10), sat: !!ms[pi].sat,
-      t: ms.map(s => rd((s.t - tPk) / 1000, 1000)), w: ms.map(s => rd(s.perp, 100)), q: qw.map(q => q.map(c => rd(c, 10000)))
+      v: 2, id: 'r' + Date.now().toString(36), date: Date.now(), stroke, hand, k: set.calib, star: false, src, face: dn < 0 ? -1 : 1, hand3: K.hand,
+      peak: rd(K.spd[pi] * 3.6 * set.calib, 10), sat: ms.some(s => s.sat && Math.abs(s.t - tPk) < 60),
+      t: ms.map(s => rd((s.t - tPk) / 1000, 1000)), w: ms.map(s => rd(s.perp, 100)), s: K.spd.map(x => rd(x * 3.6, 10)),
+      q: qw.map(q => q.map(c => rd(c, 10000))), p
     };
   }
+  // racket-head speed (km/h, calibrated) for sample i — v2 replays store it, v1 replays had the gyro-only model
+  const repKmh = (rep, i) => rep.s ? rep.s[i] * rep.k : racketKmh(rep.w[i], rep.k);
+  const repSeries = rep => rep.t.map((_, i) => repKmh(rep, i));
 
-  /* racket-face metrics at contact */
+  /* racket-face metrics at contact (the face that hit: screen side or back side) */
   function faceMetrics(rep) {
-    let pi = 0; rep.t.forEach((tt, i) => { if (Math.abs(tt) < Math.abs(rep.t[pi])) pi = i; });
-    const q = rep.q[pi], n = Q.rot(q, [0, 0, 1]), d = Q.rot(q, [0, 1, 0]);
-    const pk = rep.w[pi]; let j = pi; while (j > 0 && rep.w[j - 1] > pk * 0.3) j--;
-    return { face: Math.round(Math.asin(clamp(n[1], -1, 1)) / DEG), head: Math.round(Math.asin(clamp(d[1], -1, 1)) / DEG), whip: Math.max(0, -rep.t[j]) };
+    const pi = peakIdx(rep), q = rep.q[pi], fs = rep.face || 1;
+    const n = Q.rot(q, [0, 0, fs]), d = Q.rot(q, [0, 1, 0]);
+    const ser = repSeries(rep), pk = ser[pi]; let j = pi; while (j > 0 && ser[j - 1] > pk * 0.3) j--;
+    return { face: Math.round(Math.asin(clamp(n[1], -1, 1)) / DEG), head: Math.round(Math.asin(clamp(d[1], -1, 1)) / DEG), whip: Math.max(0, -rep.t[j]), side: fs };
   }
   const faceTxt = a => Math.abs(a) <= 3 ? 'Tegak' : a > 0 ? `Terbuka ${a}°` : `Tertutup ${-a}°`;
   const angTxt = a => a === 0 ? 'tegak' : a > 0 ? `terbuka ${a}°` : `tertutup ${-a}°`;
@@ -1069,8 +1238,8 @@
     return `<div class="card face">
       <div class="chart-head"><h3>Muka raket saat kena</h3><span class="pill ${pill[1]}">${pill[0]}</span></div>
       <div class="face-row">${dial}<div><b class="face-v">${faceTxt(f)}</b><p class="sub">Patokan ${name}: ${angTxt(lo)} sampai ${angTxt(hi)}.</p><p class="sub" style="margin-top:6px">${tip}</p></div></div>
-      <div class="face-meta"><span>Kepala raket<b>${Math.abs(m.head)}° ${m.head >= 0 ? 'di atas' : 'di bawah'} pergelangan</b></span><span>Lecutan<b>${m.whip.toFixed(2).replace('.', ',')} dtk</b></span></div>
-      <p class="note" style="padding:10px 0 0">Dibaca dari kemiringan layar HP pas titik kena; area hijau = patokan umum, bukan aturan mati. Lecutan = waktu dari mulai ngebut sampai puncak, makin singkat makin tajam.</p>
+      <div class="face-meta ball-meta"><span>Kena pakai<b>${m.side < 0 ? 'Muka backhand' : 'Muka forehand'}</b></span><span>Kepala raket<b>${Math.abs(m.head)}° ${m.head >= 0 ? 'di atas' : 'di bawah'} pergelangan</b></span><span>Lecutan<b>${m.whip.toFixed(2).replace('.', ',')} dtk</b></span></div>
+      <p class="note" style="padding:10px 0 0">Dibaca dari kemiringan HP pas titik kena, di sisi yang mukul (layar = muka forehand, belakang HP = muka backhand); area hijau = patokan umum, bukan aturan mati. Lecutan = waktu dari mulai ngebut sampai puncak, makin singkat makin tajam.</p>
     </div>`;
   }
 
@@ -1089,7 +1258,7 @@
       short: fClosed ? 'Bola jatuh sebelum net karena muka raketnya ketutup. Buka dikit dan ayun lebih ke depan.' : fOpen ? 'Bola kebanyakan naik dan jatuh sebelum net. Tutup dikit muka raketnya dan dorong lebih ke depan.' : 'Bola jatuh sebelum net. Muka raketnya udah oke, jadi ayun lebih kencang dan lebih ke depan.',
       long: fOpen ? 'Kepanjangan karena muka raketnya kebuka banget. Tutup dikit atau kurangi tenaga.' : 'Kepanjangan, bola kena kaca belakang langsung. Muka raketnya udah oke, jadi kurangi tenaga atau ayun lebih rata ke depan.',
       wide: 'Melebar, bola kena kaca samping langsung. Cek arah muka raket pas kena.',
-      back: 'Bola nggak maju ke depan. Pastikan layar HP jadi muka raket yang ngadep ke depan pas kena.'
+      back: 'Bola nggak maju ke depan. Pastikan muka raket ngadep ke depan pas kena, jangan kebuka ke atas atau miring.'
     }[fl.res];
     return `<div class="card">
       <div class="chart-head"><h3>Arah bola</h3><span class="pill ${cls}">${lbl}</span></div>
@@ -1109,7 +1278,7 @@
       ${subhdr(STROKES[rep.stroke].n, `<button class="round" data-act="del" aria-label="Hapus replay">${ICON.trash}</button>`)}
       <div class="r3d" id="r3d"><canvas id="c3d" aria-label="Replay 3D ayunan"></canvas><div class="r3d-load" id="r3dLoad">Lagi nyiapin 3D…</div>
         <div class="tools"><button class="chip" data-act="resetView">${ICON.reset}Reset</button><span style="display:flex;gap:6px"><button class="chip" data-act="look">${ICON.sliders}Tampilan</button><button class="chip" data-act="snap">${ICON.image}Simpan</button></span></div></div>
-      <div class="seg compact" id="viewSeg" role="group" aria-label="Sudut kamera">${[['auto', 'Auto'], ['swing', 'Ayunan'], ['side', 'Samping'], ['court', 'Lapangan']].map(([k, l]) => `<button data-act="view" data-k="${k}" aria-pressed="${k === 'auto'}">${l}</button>`).join('')}</div>
+      <div class="seg compact" id="viewSeg" role="group" aria-label="Sudut kamera">${[['auto', 'Auto'], ['swing', 'Belakang'], ['side', 'Samping'], ['court', 'Lapangan']].map(([k, l]) => `<button data-act="view" data-k="${k}" aria-pressed="${k === 'auto'}">${l}</button>`).join('')}</div>
       <div class="r-info"><span class="when" id="rInfo"></span><span class="note">${whenLabel(rep.date)}</span></div>
       <div class="r-speeds"><div><span>Bola ≈</span><b class="or" id="rBall">0</b><small>${U()}</small></div><div><span>Raket</span><b id="rRacket">0</b><small>${U()}</small></div></div>
       <div class="scrub-card">
@@ -1123,24 +1292,24 @@
       </div>
       ${ballCard(rep, fl)}
       ${faceCard(rep)}
-      <p class="note">Sisi oranye + panah = muka raket (layar HP). Titik oranye = titik kena; bola kuning = perkiraan arah bola. Kamera Auto pindah ke lapangan setelah kena; geser buat muter, cubit buat zoom. Posisi badan diperkirakan; arah raket dan kecepatannya dari sensor HP.</p>
+      <p class="note">Sisi oranye = muka forehand (layar HP), sisi gelap = muka backhand. Garis oranye = bagian ayunan paling kencang, di situ harusnya bola kena; bola kuning = titik kena dan arah bolanya. Geser buat muter, dua jari buat geser, cubit buat zoom.${rep.p ? ' Gerak tangan dari akselerometer, arah raket dari sensor orientasi.' : ' Posisi tangan diperkirakan; arah raket dan kecepatannya dari sensor HP.'}</p>
       <button class="btn teal" data-act="done">Selesai</button>
     </section>`;
-    const kmh = w => racketKmh(w, rep.k);
-    const wAt = tt => { let i = 0; while (i < rep.t.length - 2 && rep.t[i + 1] < tt) i++; const f = clamp((tt - rep.t[i]) / Math.max(1e-6, rep.t[i + 1] - rep.t[i]), 0, 1); return rep.w[i] + (rep.w[i + 1] - rep.w[i]) * f; };
+    const SER = repSeries(rep), PK = Math.max(...SER);
+    const wAt = tt => { let i = 0; while (i < rep.t.length - 2 && rep.t[i + 1] < tt) i++; const f = clamp((tt - rep.t[i]) / Math.max(1e-6, rep.t[i + 1] - rep.t[i]), 0, 1); return SER[i] + (SER[i + 1] - SER[i]) * f; };
     const sp = $('#spark'), sctx = sp.getContext('2d');
     function drawSpark() {
       const cs = getComputedStyle(document.documentElement), teal = cs.getPropertyValue('--teal').trim() || '#0E8A7A', orange = cs.getPropertyValue('--orange').trim() || '#FF6A2B', surf = cs.getPropertyValue('--surface').trim() || '#fff';
       const dpr = Math.min(devicePixelRatio || 1, 2), W = sp.clientWidth, H = sp.clientHeight; if (!W) return;
       sp.width = W * dpr; sp.height = H * dpr; sctx.setTransform(dpr, 0, 0, dpr, 0, 0); sctx.clearRect(0, 0, W, H);
-      const maxW = Math.max(...rep.w) * 1.08, X = tt => (tt - T0) / (T1 - T0) * W, Y = w => H - 3 - (w / maxW) * (H - 9);
-      const path = () => { sctx.beginPath(); rep.t.forEach((tt, i) => { const x = X(tt), y = Y(rep.w[i]); i ? sctx.lineTo(x, y) : sctx.moveTo(x, y); }); };
-      path(); sctx.lineTo(W, H); sctx.lineTo(0, H); sctx.closePath(); sctx.globalAlpha = 0.14; sctx.fillStyle = teal; sctx.fill(); sctx.globalAlpha = 1;
+      const maxW = PK * 1.08, X = tt => (tt - T0) / (T1 - T0) * W, Y = w => H - 3 - (w / maxW) * (H - 9);
+      const path = () => { sctx.beginPath(); rep.t.forEach((tt, i) => { const x = X(tt), y = Y(SER[i]); i ? sctx.lineTo(x, y) : sctx.moveTo(x, y); }); };
+      path(); sctx.lineTo(X(rep.t[rep.t.length - 1]), H); sctx.lineTo(X(rep.t[0]), H); sctx.closePath(); sctx.globalAlpha = 0.14; sctx.fillStyle = teal; sctx.fill(); sctx.globalAlpha = 1;
       path(); sctx.strokeStyle = teal; sctx.lineWidth = 2.2; sctx.lineJoin = 'round'; sctx.stroke();
-      const pkW = Math.max(...rep.w); sctx.beginPath(); sctx.arc(X(0), Y(pkW), 5, 0, 7); sctx.fillStyle = orange; sctx.fill(); sctx.lineWidth = 2.5; sctx.strokeStyle = surf; sctx.stroke();
+      sctx.beginPath(); sctx.arc(X(0), Y(SER[peakIdx(rep)]), 5, 0, 7); sctx.fillStyle = orange; sctx.fill(); sctx.lineWidth = 2.5; sctx.strokeStyle = surf; sctx.stroke();
     }
     function ui() {
-      const r = kmh(t > lastS ? wAt(0) : wAt(t));
+      const r = t > lastS ? wAt(0) : wAt(t);
       $('#rBall').textContent = '≈' + fv(ballOf(r)); $('#rRacket').textContent = fv(r);
       const tt = Math.abs(t) < 0.005 ? 'Pas kena' : t < 0 ? `${Math.abs(t).toFixed(2)} dtk sebelum kena` : t > lastS + 0.01 ? `Bola terbang · ${t.toFixed(2)} dtk` : `${t.toFixed(2)} dtk setelah kena`;
       $('#rInfo').textContent = tt.replace('.', ',');
@@ -1180,11 +1349,9 @@
       const seg = (key, opts) => `<div class="seg compact">${opts.map(([v, l]) => `<button data-act="lk" data-key="${key}" data-v="${v}" aria-pressed="${String(L[key]) === v}">${l}</button>`).join('')}</div>`;
       const sw = (key, label) => `<div class="row"><span class="k">${label}</span>${switchBtn('lt', L[key], label, `data-key="${key}"`)}</div>`;
       openOv(`<div class="shdr"><h2 class="title">Tampilan replay</h2><button class="link" data-act="close">Oke</button></div>
-        <span class="label">Raket</span>${seg('racket', [['classic', 'Klasik'], ['white', 'Putih'], ['orange', 'Oranye'], ['teal', 'Teal']])}
+        <span class="label">Warna muka forehand</span>${seg('racket', [['classic', 'Oranye'], ['white', 'Putih'], ['teal', 'Teal']])}
         <span class="label">Jejak ayunan</span>
-        <div class="list">${sw('ribbon', 'Pita lintasan')}${sw('ghosts', 'Raket bayangan')}${sw('peak', 'Titik kena')}${sw('dots', 'Titik lintasan')}</div>
-        <span class="label">Warna pita</span>${seg('ribbonColor', [['speed', 'Kecepatan'], ['orange', 'Oranye'], ['white', 'Putih']])}
-        <span class="label">Lebar pita</span>${seg('ribbonWidth', [['line', 'Garis tipis'], ['face', 'Satu muka']])}
+        <div class="list">${sw('ribbon', 'Garis paling kencang')}${sw('ghosts', 'Raket bayangan')}${sw('dots', 'Lintasan kepala raket')}${sw('peak', 'Bola & titik kena')}${sw('arrow', 'Panah arah muka raket')}</div>
         <span class="label">Kerapatan bayangan</span>${seg('ghostDensity', [['sparse', 'Jarang'], ['normal', 'Normal'], ['dense', 'Rapat']])}`, {
         close: closeOv,
         lk: b => { L[b.dataset.key] = b.dataset.v; persist(); b.parentElement.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x.dataset.v === b.dataset.v)); R3D.rebuild(); },
@@ -1204,18 +1371,29 @@
 
   /* ===================== swing geometry & ball flight (pure, no three.js) ===================== */
   const peakIdx = rep => { let pi = 0; rep.t.forEach((tt, i) => { if (Math.abs(tt) < Math.abs(rep.t[pi])) pi = i; }); return pi; };
-  // racket pose is measured (orientation); its position is modelled: hand on an arm from the shoulder
+  // racket pose is measured (orientation). Hand position: measured path (accelerometer) anchored at a modelled contact
+  // point, or — without one — modelled as a hand on an arm from the shoulder.
+  const HEAD_Y = 0.29, TIP_Y = 0.425; // racket: hand at 0, head centre and tip along the racket axis (m)
   function computeFrames(rep) {
     const over = !!STROKES[rep.stroke].over, hs = rep.hand === 'L' ? -1 : 1, st = rep.stroke;
     const pz = st === 'VL' ? 3.2 : over ? 5.4 : 7.6, px = 1.3 * hs;
     const Sh = [px + 0.19 * hs, over ? 1.5 : 1.42, pz];
     const bias = over ? [0, 0.3, -0.2] : [0, -0.8, -0.3];
+    const model = q => { const d = Q.rot(q, [0, 1, 0]); const a = [d[0] + bias[0], d[1] + bias[1], d[2] + bias[2]]; const L = Math.hypot(a[0], a[1], a[2]) || 1; return [Sh[0] + 0.58 * a[0] / L, Math.max(0.32, Sh[1] + 0.58 * a[1] / L), Sh[2] + 0.58 * a[2] / L]; };
+    let Hs;
+    if (rep.p && rep.p.length === rep.q.length) {
+      const pi = peakIdx(rep), A = model(rep.q[pi]);
+      let m = 0; rep.p.forEach(x => { m = Math.max(m, Math.hypot(x[0], x[1], x[2])); });
+      const k = m > 2.2 ? 2.2 / m : 1; // keep a drifting path inside arm's reach of the body
+      Hs = rep.p.map(x => [A[0] + x[0] * k, A[1] + x[1] * k, A[2] + x[2] * k]);
+      let lo = Infinity; Hs.forEach(h => { lo = Math.min(lo, h[1]); });
+      if (lo < 0.2) Hs.forEach(h => { h[1] += 0.2 - lo; });
+    } else Hs = rep.q.map(model);
+    const ser = repSeries(rep);
     return rep.q.map((q, i) => {
-      const d = Q.rot(q, [0, 1, 0]); const a = [d[0] + bias[0], d[1] + bias[1], d[2] + bias[2]]; const L = Math.hypot(a[0], a[1], a[2]) || 1;
-      const H = [Sh[0] + 0.58 * a[0] / L, Math.max(0.32, Sh[1] + 0.58 * a[1] / L), Sh[2] + 0.58 * a[2] / L];
+      const H = Hs[i];
       const at = y => { const v = Q.rot(q, [0, y, 0]); return [H[0] + v[0], H[1] + v[1], H[2] + v[2]]; };
-      const W = Q.rot(q, [1, 0, 0]);
-      return { t: rep.t[i], w: rep.w[i], q, H, C: at(0.25), tip: at(0.40), thr: at(0.12), W };
+      return { t: rep.t[i], w: rep.w[i], kmh: ser[i], q, H, C: at(HEAD_Y), tip: at(TIP_Y), thr: at(0.12), W: Q.rot(q, [1, 0, 0]) };
     });
   }
   const NET_H = 0.88, BALL_R = 0.033;
@@ -1224,12 +1402,12 @@
   // launch ≈ 70% face normal + 30% racket-head path, speed = estimated ball speed; gravity + air drag
   function ballFlight(rep) {
     const key = rep.id + '|' + rep.k + '|' + rep.t.length; if (flightCache.has(key)) return flightCache.get(key);
-    const F = computeFrames(rep), pi = peakIdx(rep), f = F[pi], n = Q.rot(f.q, [0, 0, 1]);
-    const a = F[Math.max(0, pi - 1)].tip, b = F[Math.min(F.length - 1, pi + 1)].tip;
+    const F = computeFrames(rep), pi = peakIdx(rep), f = F[pi], n = Q.rot(f.q, [0, 0, rep.face || 1]);
+    const a = F[Math.max(0, pi - 1)].C, b = F[Math.min(F.length - 1, pi + 1)].C;
     let v = [b[0] - a[0], b[1] - a[1], b[2] - a[2]]; const vl = Math.hypot(v[0], v[1], v[2]) || 1; v = v.map(c => c / vl);
     let dir = [0.7 * n[0] + 0.3 * v[0], 0.7 * n[1] + 0.3 * v[1], 0.7 * n[2] + 0.3 * v[2]]; const dl = Math.hypot(dir[0], dir[1], dir[2]) || 1; dir = dir.map(c => c / dl);
-    const sp = ballOf(racketKmh(rep.w[pi], rep.k)) / 3.6;
-    let p = f.C.slice(), vel = dir.map(c => c * sp), tt = 0, res = null, netY = null, apex = p[1], land = null, step = 0;
+    const sp = ballOf(repKmh(rep, pi)) / 3.6;
+    let p = f.C.map((c, i) => c + n[i] * 0.05), vel = dir.map(c => c * sp), tt = 0, res = null, netY = null, apex = p[1], land = null, step = 0;
     const pts = [p.slice()], ts = [0], K = 0.019, G = 9.81, dt = 1 / 240;
     if (vel[2] > -0.3) res = 'back';
     while (!res && tt < 4) {
@@ -1260,9 +1438,10 @@
   /* ===================== 3D replay engine (three.js, loaded on demand) ===================== */
   const R3D = (() => {
     let THREEp = null, THREE = null, renderer = null, scene = null, camera = null, canvas = null, rep = null, ro = null;
-    let F = [], pi = 0, i0 = 0, i1 = 0, racket = null, shadow = null, ribbon = null, ghosts = [], dots = [], peakM = null, swingGrp = null;
-    let ballM = null, ballSh = null, pathL = null, ringM = null, flight = null;
-    let orbit = null, home = null, detach = null, views = null, camMode = 'auto', curT = 0, onManual = null;
+    let F = [], pi = 0, racket = null, swingGrp = null, sun = null, ghosts = [], pathL = null, p0 = 0, p1 = 0;
+    let arc = null, a0 = 0, a1 = 0, arcSegs = 0, ballM = null, ballSh = null, flightL = null, ringM = null, flight = null;
+    let orbit = null, views = null, detach = null, camMode = 'auto', curT = 0, onManual = null;
+    const ARC_RAD = 8;
     function loadThree() {
       if (window.THREE) return Promise.resolve(window.THREE);
       return THREEp || (THREEp = new Promise((res, rej) => {
@@ -1272,158 +1451,191 @@
       }));
     }
     const basic = (color, extra = {}) => new THREE.MeshBasicMaterial(Object.assign({ color }, extra));
+    const V = a => new THREE.Vector3(a[0], a[1], a[2]);
+    function canvasTex(w, h, draw, repeat) {
+      const c = document.createElement('canvas'); c.width = w; c.height = h; draw(c.getContext('2d'), w, h);
+      const t = new THREE.CanvasTexture(c); if ('encoding' in t) t.encoding = THREE.sRGBEncoding;
+      if (repeat) { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(repeat[0], repeat[1]); }
+      t.anisotropy = 4; return t;
+    }
+
+    /* ---- padel court: blue turf, white lines, glass back walls, mesh fences, net ---- */
     function buildCourt() {
       scene = new THREE.Scene();
-      scene.background = new THREE.Color(0xd6ece6); scene.fog = new THREE.Fog(0xd6ece6, 22, 52);
-      camera = new THREE.PerspectiveCamera(46, 1, 0.03, 140);
-      scene.add(new THREE.HemisphereLight(0xffffff, 0x2a7f6a, 1.0));
-      const dl = new THREE.DirectionalLight(0xffffff, 0.85); dl.position.set(3, 9, 6); scene.add(dl);
+      scene.background = canvasTex(4, 256, (g, w, h) => { const gr = g.createLinearGradient(0, 0, 0, h); gr.addColorStop(0, '#5b9cd8'); gr.addColorStop(0.6, '#a8cff0'); gr.addColorStop(1, '#e2eef8'); g.fillStyle = gr; g.fillRect(0, 0, w, h); });
+      scene.fog = new THREE.Fog(0xcfe2f2, 26, 80);
+      camera = new THREE.PerspectiveCamera(50, 1, 0.03, 200);
+      scene.add(new THREE.HemisphereLight(0xeef5ff, 0x2a4e7c, 0.8));
+      sun = new THREE.DirectionalLight(0xffffff, 1.1); sun.castShadow = true;
+      sun.shadow.mapSize.set(1024, 1024); sun.shadow.bias = -0.0005; sun.shadow.normalBias = 0.012;
+      Object.assign(sun.shadow.camera, { near: 0.5, far: 30, left: -2.6, right: 2.6, top: 2.6, bottom: -2.6 });
+      scene.add(sun); scene.add(sun.target);
       const plane = (w, h, mat) => new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
-      const ground = plane(70, 80, basic(0x247a66)); ground.rotation.x = -Math.PI / 2; ground.position.y = -0.003; scene.add(ground);
-      const court = plane(10, 20, basic(0x2c9a7f)); court.rotation.x = -Math.PI / 2; scene.add(court);
-      const lineMat = basic(0xf4f8ff);
-      const line = (x1, z1, x2, z2) => { const len = Math.hypot(x2 - x1, z2 - z1); const m = plane(len, 0.05, lineMat); m.rotation.x = -Math.PI / 2; m.rotation.z = -Math.atan2(z2 - z1, x2 - x1); m.position.set((x1 + x2) / 2, 0.002, (z1 + z2) / 2); scene.add(m); };
-      line(-5, 6.95, 5, 6.95); line(-5, -6.95, 5, -6.95); line(0, -7.15, 0, 7.15); line(-5, 10, 5, 10); line(-5, -10, 5, -10); line(-5, -10, -5, 10); line(5, -10, 5, 10);
-      // net
-      const net = plane(10, 0.86, basic(0x0b2420, { transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false })); net.position.set(0, 0.45, 0); scene.add(net);
-      const band = new THREE.Mesh(new THREE.BoxGeometry(10, 0.05, 0.02), basic(0xf4f8ff)); band.position.set(0, 0.88, 0); scene.add(band);
-      [-5.05, 5.05].forEach(x => { const post = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.95, 0.08), basic(0x1b2f2b)); post.position.set(x, 0.475, 0); scene.add(post); });
-      // glass + frames
-      const glassMat = basic(0xe6fbf6, { transparent: true, opacity: 0.14, side: THREE.DoubleSide, depthWrite: false });
-      const edgeMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 });
-      const panel = (w, h, x, y, z, ry) => { const g = new THREE.PlaneGeometry(w, h); const m = new THREE.Mesh(g, glassMat); m.position.set(x, y, z); m.rotation.y = ry; scene.add(m); const e = new THREE.LineSegments(new THREE.EdgesGeometry(g), edgeMat); e.position.copy(m.position); e.rotation.copy(m.rotation); scene.add(e); };
+      const turf = (base, n) => canvasTex(256, 256, (g, w, h) => { g.fillStyle = base; g.fillRect(0, 0, w, h); for (let i = 0; i < n; i++) { const l = Math.random(); g.fillStyle = l < 0.5 ? 'rgba(0,0,0,.07)' : 'rgba(255,255,255,.06)'; g.fillRect(Math.random() * w, Math.random() * h, 1 + Math.random() * 1.5, 1 + Math.random() * 1.5); } }, [6, 12]);
+      const ground = plane(90, 100, new THREE.MeshLambertMaterial({ color: 0x24497a })); ground.rotation.x = -Math.PI / 2; ground.position.y = -0.004; ground.receiveShadow = true; scene.add(ground);
+      const court = plane(10, 20, new THREE.MeshLambertMaterial({ color: 0xffffff, map: turf('#2f6ec0', 9000) })); court.rotation.x = -Math.PI / 2; court.receiveShadow = true; scene.add(court);
+      const lineMat = basic(0xf6f9ff);
+      const line = (x1, z1, x2, z2) => { const len = Math.hypot(x2 - x1, z2 - z1); const m = plane(len, 0.05, lineMat); m.rotation.x = -Math.PI / 2; m.rotation.z = -Math.atan2(z2 - z1, x2 - x1); m.position.set((x1 + x2) / 2, 0.003, (z1 + z2) / 2); m.receiveShadow = true; scene.add(m); };
+      line(-5, 6.95, 5, 6.95); line(-5, -6.95, 5, -6.95); line(0, -6.95, 0, 6.95); line(-5, 9.97, 5, 9.97); line(-5, -9.97, 5, -9.97); line(-4.97, -10, -4.97, 10); line(4.97, -10, 4.97, 10);
+      // net: fine mesh texture, white band, dark posts
+      const netTex = canvasTex(256, 32, (g, w, h) => { g.clearRect(0, 0, w, h); g.strokeStyle = 'rgba(20,28,38,.85)'; g.lineWidth = 1; for (let x = 0; x <= w; x += 4) { g.beginPath(); g.moveTo(x + 0.5, 0); g.lineTo(x + 0.5, h); g.stroke(); } for (let y = 0; y <= h; y += 4) { g.beginPath(); g.moveTo(0, y + 0.5); g.lineTo(w, y + 0.5); g.stroke(); } }, [6, 1]);
+      const net = plane(10, 0.86, new THREE.MeshBasicMaterial({ map: netTex, transparent: true, side: THREE.DoubleSide, depthWrite: false, alphaTest: 0.05 })); net.position.set(0, 0.45, 0); scene.add(net);
+      const band = new THREE.Mesh(new THREE.BoxGeometry(10, 0.05, 0.02), basic(0xf6f9ff)); band.position.set(0, 0.88, 0); scene.add(band);
+      const darkM = new THREE.MeshLambertMaterial({ color: 0x1c2733 });
+      [-5.06, 5.06].forEach(x => { const post = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.95, 0.08), darkM); post.position.set(x, 0.475, 0); post.castShadow = true; scene.add(post); });
+      // glass (back walls + first 4 m of the side walls, stepped)
+      const glassMat = basic(0xd9ecfb, { transparent: true, opacity: 0.13, side: THREE.DoubleSide, depthWrite: false });
+      const glassEdge = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 });
+      const panel = (w, h, x, y, z, ry) => { const g = new THREE.PlaneGeometry(w, h); const m = new THREE.Mesh(g, glassMat); m.position.set(x, y, z); m.rotation.y = ry; scene.add(m); const e = new THREE.LineSegments(new THREE.EdgesGeometry(g), glassEdge); e.position.copy(m.position); e.rotation.copy(m.rotation); scene.add(e); };
       [-10, 10].forEach(z => { for (let i = 0; i < 5; i++) panel(2, 3, -4 + i * 2, 1.5, z, 0); });
-      [-5, 5].forEach(x => [-1, 1].forEach(sgn => { panel(2, 3, x, 1.5, sgn * 9, Math.PI / 2); panel(2, 3, x, 1.5, sgn * 7, Math.PI / 2); panel(2, 2, x, 1, sgn * 5, Math.PI / 2); }));
-      // fence mesh
-      const pts = [], add = (a, b) => pts.push(new THREE.Vector3(...a), new THREE.Vector3(...b));
-      [-10, 10].forEach(z => { for (let x = -5; x <= 5.001; x += 0.5) add([x, 3, z], [x, 4, z]); for (let y = 3; y <= 4.001; y += 0.5) add([-5, y, z], [5, y, z]); });
+      [-5, 5].forEach(x => [-1, 1].forEach(sg => { panel(2, 3, x, 1.5, sg * 9, Math.PI / 2); panel(2, 2, x, 1, sg * 7, Math.PI / 2); }));
+      // posts
+      const post = (x, z, h) => { const m = new THREE.Mesh(new THREE.BoxGeometry(0.07, h, 0.07), darkM); m.position.set(x, h / 2, z); scene.add(m); };
+      [-10, 10].forEach(z => { for (let x = -5; x <= 5.001; x += 2) post(x, z, 4); });
+      [-5, 5].forEach(x => { for (let z = -8; z <= 8.001; z += 2) post(x, z, Math.abs(z) >= 6 ? 4 : 3); });
+      // wire mesh: above the back glass, along the sides
+      const pts = [], add = (a, b) => pts.push(new THREE.Vector3(a[0], a[1], a[2]), new THREE.Vector3(b[0], b[1], b[2]));
+      const S = 0.25;
+      [-10, 10].forEach(z => { for (let x = -5; x <= 5.001; x += S) add([x, 3, z], [x, 4, z]); for (let y = 3; y <= 4.001; y += S) add([-5, y, z], [5, y, z]); });
       [-5, 5].forEach(x => {
-        for (let z = -4; z <= 4.001; z += 0.5) add([x, 0, z], [x, 3, z]);
-        for (let y = 0; y <= 3.001; y += 0.5) add([x, y, -4], [x, y, 4]);
-        [-1, 1].forEach(sg => { for (let z = 4; z <= 10.001; z += 0.5) add([x, sg * z > 6 ? 3 : 2, sg * z], [x, 4, sg * z]); add([x, 4, sg * 4], [x, 4, sg * 10]); });
+        for (let z = -6; z <= 6.001; z += S) add([x, 0, z], [x, 3, z]);
+        for (let y = 0; y <= 3.001; y += S) add([x, y, -6], [x, y, 6]);
+        [-1, 1].forEach(sg => { for (let z = 6; z <= 10.001; z += S) add([x, Math.abs(z) > 8 ? 3 : 2, sg * z], [x, 4, sg * z]); for (let y = 3; y <= 4.001; y += S) add([x, y, sg * 6], [x, y, sg * 10]); add([x, 2, sg * 6], [x, 2, sg * 8]); });
       });
-      const fg = new THREE.BufferGeometry().setFromPoints(pts);
-      scene.add(new THREE.LineSegments(fg, new THREE.LineBasicMaterial({ color: 0x1d3a35, transparent: true, opacity: 0.35 })));
+      scene.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: 0x1b2632, transparent: true, opacity: 0.42 })));
+      const rail = new THREE.MeshLambertMaterial({ color: 0x1c2733 });
+      [-5, 5].forEach(x => { const r = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 12), rail); r.position.set(x, 3, 0); scene.add(r); });
     }
-    // [frame, string face (= phone screen), face arrow]
-    const RACKET_COLORS = { classic: [0x1b2826, 0xff7a3d, 0x0b6b60], white: [0xd9e3df, 0xff7a3d, 0x0b6b60], orange: [0xff6a2b, 0xffffff, 0x0b6b60], teal: [0x0e8a7a, 0xff7a3d, 0x1b2826] };
-    let headShape = null, headPlain = null;
-    function shapes() {
-      if (headShape) return;
-      headShape = new THREE.Shape(); headShape.absellipse(0, 0, 0.13, 0.15, 0, Math.PI * 2, false, 0);
-      for (let r = 0, yy = -0.11; yy <= 0.111; yy += 0.026, r++) for (let xx = -0.104; xx <= 0.105; xx += 0.026) {
-        const x = xx + (r % 2) * 0.013; if ((x / 0.104) ** 2 + (yy / 0.124) ** 2 > 1) continue;
-        const h = new THREE.Path(); h.absarc(x, yy, 0.0065, 0, Math.PI * 2, true); headShape.holes.push(h);
-      }
-      headPlain = new THREE.Shape(); headPlain.absellipse(0, 0, 0.13, 0.15, 0, Math.PI * 2, false, 0);
+
+    /* ---- padel racket: hand at the origin, racket axis = +y, forehand face (phone screen) = +z ---- */
+    const RX = 0.13, RY = 0.142, RT = 0.038;
+    const FACE_COLORS = { classic: '#ff7a3d', white: '#eef2f5', teal: '#19a896', orange: '#ff7a3d' };
+    const ellipse = (rx, ry, cy = 0) => { const s = new THREE.Shape(); s.absellipse(0, cy, rx, ry, 0, Math.PI * 2, false, 0); return s; };
+    function faceTex(color) {
+      return canvasTex(256, 280, (g, w, h) => {
+        g.fillStyle = color; g.fillRect(0, 0, w, h);
+        const gr = g.createRadialGradient(w * 0.38, h * 0.32, 10, w / 2, h / 2, w * 0.7); gr.addColorStop(0, 'rgba(255,255,255,.16)'); gr.addColorStop(1, 'rgba(0,0,0,.12)'); g.fillStyle = gr; g.fillRect(0, 0, w, h);
+        g.fillStyle = 'rgba(0,0,0,.34)';
+        for (let r = 0, y = 26; y < h - 20; y += 19, r++) for (let x = 22 + (r % 2) * 11; x < w - 18; x += 22) {
+          const nx = (x - w / 2) / (w * 0.42), ny = (y - h / 2) / (h * 0.42); if (nx * nx + ny * ny > 1) continue;
+          g.beginPath(); g.arc(x, y, 5.2, 0, Math.PI * 2); g.fill();
+        }
+      });
     }
-    function makeRacket(ghost) {
-      shapes();
-      const g = new THREE.Group(), [frameC, faceC, arrowC] = RACKET_COLORS[set.look.racket] || RACKET_COLORS.classic;
-      if (ghost) {
-        const m = basic(0xf4fffb, { transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false });
-        const hg = new THREE.ShapeGeometry(headPlain, 20); hg.translate(0, 0.25, 0); g.add(new THREE.Mesh(hg, m));
-        const hd = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.2, 0.02), m); hd.position.y = 0.02; g.add(hd);
-        return g;
+    function uvPlanar(geo, rx, ry, cy = 0) { const p = geo.attributes.position, uv = geo.attributes.uv; for (let i = 0; i < p.count; i++) uv.setXY(i, p.getX(i) / (2 * rx) + 0.5, (p.getY(i) - cy) / (2 * ry) + 0.5); uv.needsUpdate = true; return geo; }
+    function makeRacket() {
+      const g = new THREE.Group(), L = set.look;
+      const frameM = new THREE.MeshStandardMaterial({ color: 0x16191e, roughness: 0.38, metalness: 0.25 });
+      const ring = ellipse(RX, RY); ring.holes.push(ellipse(RX - 0.014, RY - 0.014));
+      const rg = new THREE.ExtrudeGeometry(ring, { depth: RT - 0.008, bevelEnabled: true, bevelThickness: 0.004, bevelSize: 0.004, bevelSegments: 2, curveSegments: 44 });
+      rg.translate(0, HEAD_Y, -(RT - 0.008) / 2); g.add(new THREE.Mesh(rg, frameM));
+      const fr = ellipse(RX - 0.012, RY - 0.012, HEAD_Y), fg = uvPlanar(new THREE.ShapeGeometry(fr, 44), RX - 0.012, RY - 0.012, HEAD_Y);
+      const front = new THREE.Mesh(fg, new THREE.MeshStandardMaterial({ map: faceTex(FACE_COLORS[L.racket] || FACE_COLORS.classic), roughness: 0.62, emissive: 0x000000 }));
+      front.position.z = RT / 2 - 0.002; g.add(front);
+      const back = new THREE.Mesh(fg, new THREE.MeshStandardMaterial({ map: faceTex('#353c45'), roughness: 0.7 }));
+      back.rotation.y = Math.PI; back.position.z = -RT / 2 + 0.002; g.add(back);
+      // throat (open bridge) + handle + orange end cap
+      const th = new THREE.Shape(); th.moveTo(-0.021, 0.07); th.lineTo(0.021, 0.07); th.lineTo(0.092, HEAD_Y - RY + 0.045); th.lineTo(-0.092, HEAD_Y - RY + 0.045); th.closePath();
+      const hole = new THREE.Path(); hole.moveTo(0, 0.102); hole.lineTo(0.048, HEAD_Y - RY + 0.03); hole.lineTo(-0.048, HEAD_Y - RY + 0.03); hole.closePath(); th.holes.push(hole);
+      const thg = new THREE.ExtrudeGeometry(th, { depth: 0.026, bevelEnabled: true, bevelThickness: 0.003, bevelSize: 0.003, bevelSegments: 1 }); thg.translate(0, 0, -0.013);
+      g.add(new THREE.Mesh(thg, frameM));
+      const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.0165, 0.0185, 0.14, 20), new THREE.MeshStandardMaterial({ color: 0x23272d, roughness: 0.92 })); grip.position.y = 0.0; g.add(grip);
+      const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.021, 0.021, 0.012, 20), new THREE.MeshStandardMaterial({ color: 0xff6a2b, roughness: 0.6 })); cap.position.y = -0.074; g.add(cap);
+      if (L.arrow) {
+        const am = basic(0x0b6b60), z0 = RT / 2 + 0.004;
+        const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.0065, 0.0065, 0.14, 10), am); shaft.rotation.x = Math.PI / 2; shaft.position.set(0, HEAD_Y, z0 + 0.07); g.add(shaft);
+        const head = new THREE.Mesh(new THREE.ConeGeometry(0.02, 0.055, 16), am); head.rotation.x = Math.PI / 2; head.position.set(0, HEAD_Y, z0 + 0.165); g.add(head);
       }
-      const depth = 0.034;
-      const geo = new THREE.ExtrudeGeometry(headShape, { depth, bevelEnabled: true, bevelThickness: 0.003, bevelSize: 0.004, bevelSegments: 2, curveSegments: 28 });
-      geo.translate(0, 0.25, -depth / 2);
-      g.add(new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: frameC, roughness: 0.5, metalness: 0.1 })));
-      const face = new THREE.ShapeGeometry(headShape, 28); face.translate(0, 0.25, depth / 2 + 0.0035);
-      g.add(new THREE.Mesh(face, new THREE.MeshStandardMaterial({ color: faceC, roughness: 0.6, emissive: faceC, emissiveIntensity: 0.25 })));
-      // arrow out of the string face: which way the face points
-      const am = basic(arrowC), z0 = depth / 2 + 0.004;
-      const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.0075, 0.0075, 0.16, 10), am); shaft.rotation.x = Math.PI / 2; shaft.position.set(0, 0.25, z0 + 0.08); g.add(shaft);
-      const head = new THREE.Mesh(new THREE.ConeGeometry(0.022, 0.06, 16), am); head.rotation.x = Math.PI / 2; head.position.set(0, 0.25, z0 + 0.19); g.add(head);
-      const th = new THREE.Shape(); th.moveTo(-0.02, 0.06); th.lineTo(0.02, 0.06); th.lineTo(0.08, 0.14); th.lineTo(-0.08, 0.14); th.closePath();
-      const hole = new THREE.Path(); hole.moveTo(0, 0.085); hole.lineTo(0.035, 0.128); hole.lineTo(-0.035, 0.128); hole.closePath(); th.holes.push(hole);
-      const thg = new THREE.ExtrudeGeometry(th, { depth: 0.028, bevelEnabled: false }); thg.translate(0, 0, -0.014);
-      g.add(new THREE.Mesh(thg, new THREE.MeshStandardMaterial({ color: frameC, roughness: 0.5 })));
-      const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.0175, 0.0185, 0.13, 18), new THREE.MeshStandardMaterial({ color: 0x0d1117, roughness: 0.9 }));
-      g.add(grip);
-      const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.021, 0.021, 0.012, 18), new THREE.MeshStandardMaterial({ color: 0xff6a2b, roughness: 0.6 })); cap.position.y = -0.07; g.add(cap);
+      g.traverse(o => { if (o.isMesh) o.castShadow = true; });
       return g;
     }
-    const ramp = [[0, [0.25, 0.62, 0.56]], [0.5, [0.93, 0.98, 0.96]], [0.8, [1.0, 0.55, 0.25]], [1, [0.92, 0.27, 0.12]]];
-    function speedColor(x) {
-      x = clamp(x, 0, 1); let i = 0; while (i < ramp.length - 2 && x > ramp[i + 1][0]) i++;
-      const [x0, c0] = ramp[i], [x1, c1] = ramp[i + 1], f = (x - x0) / (x1 - x0);
-      return [c0[0] + (c1[0] - c0[0]) * f, c0[1] + (c1[1] - c0[1]) * f, c0[2] + (c1[2] - c0[2]) * f];
+    let ghostGeo = null, ghostEdge = null, ghostMat = null, ghostLine = null;
+    function makeGhost() {
+      if (!ghostGeo) {
+        const hand = new THREE.Shape(); hand.moveTo(-0.017, -0.075); hand.lineTo(0.017, -0.075); hand.lineTo(0.02, 0.07); hand.lineTo(0.088, HEAD_Y - RY + 0.04); hand.lineTo(-0.088, HEAD_Y - RY + 0.04); hand.lineTo(-0.02, 0.07); hand.closePath();
+        ghostGeo = new THREE.ShapeGeometry([ellipse(RX, RY, HEAD_Y), hand], 32);
+        ghostEdge = new THREE.EdgesGeometry(new THREE.ShapeGeometry(ellipse(RX, RY, HEAD_Y), 32));
+        ghostMat = basic(0xf2f8ff, { transparent: true, opacity: 0.2, side: THREE.DoubleSide, depthWrite: false });
+        ghostLine = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 });
+      }
+      const g = new THREE.Group(); g.add(new THREE.Mesh(ghostGeo, ghostMat)); g.add(new THREE.LineSegments(ghostEdge, ghostLine)); return g;
     }
+
     function buildSwing() {
-      if (swingGrp) { scene.remove(swingGrp); swingGrp.traverse(o => { if (o.geometry) o.geometry.dispose(); }); }
+      if (swingGrp) { scene.remove(swingGrp); swingGrp.traverse(o => { if (o.geometry && o.geometry !== ghostGeo && o.geometry !== ghostEdge) o.geometry.dispose(); if (o.material && o.material !== ghostMat && o.material !== ghostLine) { if (o.material.map) o.material.map.dispose(); o.material.dispose(); } }); }
       swingGrp = new THREE.Group(); scene.add(swingGrp);
       F = computeFrames(rep); pi = peakIdx(rep);
-      const pk = Math.max(...rep.w), L = set.look;
-      i0 = pi; while (i0 > 0 && (rep.w[i0 - 1] > pk * 0.16 || pi - i0 < 4)) i0--; i0 = Math.max(0, i0 - 2);
-      i1 = pi; while (i1 < F.length - 1 && (rep.w[i1 + 1] > pk * 0.16 || i1 - pi < 4)) i1++; i1 = Math.min(F.length - 1, i1 + 2);
-      const colorOf = i => L.ribbonColor === 'orange' ? [1.0, 0.42, 0.17] : L.ribbonColor === 'white' ? [0.96, 0.97, 1] : speedColor(F[i].w / pk);
-      // ribbon
-      ribbon = null;
-      if (L.ribbon && i1 > i0) {
-        const n = i1 - i0 + 1, pos = new Float32Array(n * 6), col = new Float32Array(n * 6), idx = [];
-        for (let k = 0; k < n; k++) {
-          const f = F[i0 + k]; let a, b;
-          if (L.ribbonWidth === 'line') { a = f.tip.map((v, j) => v - f.W[j] * 0.014); b = f.tip.map((v, j) => v + f.W[j] * 0.014); }
-          else { a = f.thr; b = f.tip; }
-          pos.set(a, k * 6); pos.set(b, k * 6 + 3); const c = colorOf(i0 + k); col.set(c, k * 6); col.set(c, k * 6 + 3);
-          if (k < n - 1) { const v = k * 2; idx.push(v, v + 1, v + 2, v + 1, v + 3, v + 2); }
-        }
-        const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setAttribute('color', new THREE.BufferAttribute(col, 3)); g.setIndex(idx);
-        ribbon = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: L.ribbonWidth === 'line' ? 0.95 : 0.55, side: THREE.DoubleSide, depthWrite: false }));
-        swingGrp.add(ribbon);
+      const n = F.length, pk = F[pi].kmh || 1, L = set.look;
+      // the stroke: from the take-back to the end of the follow-through (head speed above 12% of the peak)
+      p0 = pi; while (p0 > 0 && (F[p0 - 1].kmh > pk * 0.12 || pi - p0 < 6)) p0--;
+      p1 = pi; while (p1 < n - 1 && (F[p1 + 1].kmh > pk * 0.12 || p1 - pi < 6)) p1++;
+      // fast part (ghosts) and peak zone (glow arc)
+      let g0 = pi, g1 = pi; while (g0 > 0 && F[g0 - 1].kmh > pk * 0.25) g0--; while (g1 < n - 1 && F[g1 + 1].kmh > pk * 0.25) g1++;
+      a0 = pi; a1 = pi; while (a0 > 0 && F[a0 - 1].kmh >= pk * 0.7) a0--; while (a1 < n - 1 && F[a1 + 1].kmh >= pk * 0.7) a1++;
+      a0 = Math.max(0, a0 - 1); a1 = Math.min(n - 1, a1 + 1); while (a1 - a0 < 4) { if (a0 > 0) a0--; if (a1 < n - 1) a1++; if (a0 === 0 && a1 === n - 1) break; }
+      // head path line (whole stroke)
+      pathL = null;
+      if (L.dots && p1 > p0) {
+        pathL = new THREE.Line(new THREE.BufferGeometry().setFromPoints(F.slice(p0, p1 + 1).map(f => V(f.C))), new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5 }));
+        pathL.geometry.setDrawRange(0, 0); swingGrp.add(pathL);
       }
-      // ghosts
+      // ghost rackets spaced along the head path
       ghosts = [];
       if (L.ghosts) {
-        const step = { sparse: 6, normal: 4, dense: 2 }[L.ghostDensity] || 4;
-        for (let i = i0; i <= i1; i += step) { const gr = makeRacket(true); gr.position.set(...F[i].H); gr.quaternion.set(...F[i].q); gr.userData.i = i; swingGrp.add(gr); ghosts.push(gr); }
+        const step = { sparse: 0.12, normal: 0.075, dense: 0.045 }[L.ghostDensity] || 0.075; let last = null;
+        for (let i = g0; i <= g1 && ghosts.length < 48; i++) {
+          if (last && Math.hypot(F[i].C[0] - last[0], F[i].C[1] - last[1], F[i].C[2] - last[2]) < step) continue;
+          const gr = makeGhost(); gr.position.set(F[i].H[0], F[i].H[1], F[i].H[2]); gr.quaternion.set(F[i].q[0], F[i].q[1], F[i].q[2], F[i].q[3]); gr.userData.i = i; gr.visible = false; swingGrp.add(gr); ghosts.push(gr); last = F[i].C;
+        }
       }
-      // dots
-      dots = [];
-      if (L.dots) {
-        const dg = new THREE.SphereGeometry(0.009, 8, 6);
-        for (let i = i0; i <= i1; i++) { const c = speedColor(F[i].w / pk); const m = new THREE.Mesh(dg, basic(new THREE.Color(c[0], c[1], c[2]))); m.position.set(...F[i].C); m.userData.i = i; swingGrp.add(m); dots.push(m); }
+      // glow arc where the racket head is fastest (= where the ball belongs)
+      arc = null;
+      if (L.ribbon && a1 > a0) {
+        const curve = new THREE.CatmullRomCurve3(F.slice(a0, a1 + 1).map(f => V(f.C))); arcSegs = (a1 - a0) * 6;
+        const core = new THREE.Mesh(new THREE.TubeGeometry(curve, arcSegs, 0.0105, ARC_RAD, false), basic(0xffd27a));
+        const glow = new THREE.Mesh(new THREE.TubeGeometry(curve, arcSegs, 0.03, ARC_RAD, false), basic(0xff6a2b, { transparent: true, opacity: 0.36, depthWrite: false }));
+        arc = [core, glow]; arc.forEach(m => { m.geometry.setDrawRange(0, 0); swingGrp.add(m); });
       }
-      // contact marker
-      peakM = null;
-      if (L.peak) { peakM = new THREE.Mesh(new THREE.SphereGeometry(0.03, 18, 12), basic(0xff6a2b)); peakM.position.set(...F[pi].C); swingGrp.add(peakM); }
-      // racket + floor shadow
-      racket = makeRacket(false); swingGrp.add(racket);
-      shadow = new THREE.Mesh(new THREE.CircleGeometry(0.17, 24), basic(0x000000, { transparent: true, opacity: 0.18, depthWrite: false })); shadow.rotation.x = -Math.PI / 2; swingGrp.add(shadow);
-      // ball flight
+      racket = makeRacket(); swingGrp.add(racket);
+      // ball: waits at the contact point, flies after the peak
       flight = ballFlight(rep);
-      ballM = new THREE.Mesh(new THREE.SphereGeometry(0.05, 20, 14), basic(0xf2e14c)); ballM.visible = false; swingGrp.add(ballM);
-      ballSh = new THREE.Mesh(new THREE.CircleGeometry(0.06, 18), basic(0x000000, { transparent: true, opacity: 0.22, depthWrite: false })); ballSh.rotation.x = -Math.PI / 2; ballSh.visible = false; swingGrp.add(ballSh);
-      pathL = new THREE.Line(new THREE.BufferGeometry().setFromPoints(flight.pts.map(p => new THREE.Vector3(p[0], p[1], p[2]))), new THREE.LineDashedMaterial({ color: 0xffffff, dashSize: 0.16, gapSize: 0.1, transparent: true, opacity: 0.95 }));
-      pathL.computeLineDistances(); pathL.geometry.setDrawRange(0, 0); swingGrp.add(pathL);
+      ballM = new THREE.Mesh(new THREE.SphereGeometry(BALL_R, 20, 14), new THREE.MeshStandardMaterial({ color: 0xe3f23a, roughness: 0.55, emissive: 0x4a5200, emissiveIntensity: 0.4 }));
+      ballM.visible = !!L.peak; swingGrp.add(ballM);
+      ballSh = new THREE.Mesh(new THREE.CircleGeometry(0.05, 18), basic(0x000000, { transparent: true, opacity: 0.25, depthWrite: false })); ballSh.rotation.x = -Math.PI / 2; ballSh.visible = false; swingGrp.add(ballSh);
+      flightL = new THREE.Line(new THREE.BufferGeometry().setFromPoints(flight.pts.map(p => V(p))), new THREE.LineBasicMaterial({ color: 0xf2ff5a, transparent: true, opacity: 0.9 }));
+      flightL.geometry.setDrawRange(0, 0); swingGrp.add(flightL);
       ringM = null;
       if (flight.land) {
-        ringM = new THREE.Mesh(new THREE.RingGeometry(0.13, 0.22, 36), basic(flight.res === 'in' ? 0x0e8a7a : 0xff6a2b, { side: THREE.DoubleSide }));
+        ringM = new THREE.Mesh(new THREE.RingGeometry(0.13, 0.21, 40), basic(flight.res === 'in' ? 0x2fe0b4 : 0xff6a2b, { side: THREE.DoubleSide }));
         ringM.rotation.x = -Math.PI / 2; ringM.position.set(flight.land[0], 0.012, flight.land[2]); ringM.visible = false; swingGrp.add(ringM);
       }
-      // camera presets
-      const c = [0, 0, 0]; for (let i = i0; i <= i1; i++) for (let j = 0; j < 3; j++) c[j] += F[i].C[j] / (i1 - i0 + 1);
-      const hs = rep.hand === 'L' ? -1 : 1, C = F[pi].C;
-      home = { target: new THREE.Vector3(c[0], c[1], c[2]), az: -0.34 * hs, pol: 1.12, r: 2.35 };
-      const Ld = flight.land || [C[0], 0, C[2] - 6], span = Math.hypot(C[0] - Ld[0], C[2] - Ld[2]);
+      // camera presets around the swing
+      const c = [0, 0, 0]; for (let i = g0; i <= g1; i++) for (let j = 0; j < 3; j++) c[j] += F[i].C[j] / (g1 - g0 + 1);
+      let ext = 0.3; for (let i = p0; i <= p1; i++) ext = Math.max(ext, Math.hypot(F[i].C[0] - c[0], F[i].C[1] - c[1], F[i].C[2] - c[2]));
+      const hs = rep.hand === 'L' ? -1 : 1, C = F[pi].C, rB = clamp(ext * 2.0 + 1.1, 1.9, 3.8);
+      // cameras are placed by eye position and kept inside the glass box (never behind the fence)
+      const inBox = e => [clamp(e[0], -4.7, 4.7), clamp(e[1], 0.3, 6), clamp(e[2], -9.6, 9.65)];
+      const fromEye = (eye, tg) => { const e = inBox(eye), d = [e[0] - tg[0], e[1] - tg[1], e[2] - tg[2]], r = Math.hypot(d[0], d[1], d[2]); return { target: new THREE.Vector3(tg[0], tg[1], tg[2]), az: Math.atan2(d[0], d[2]), pol: Math.acos(clamp(d[1] / r, -1, 1)), r }; };
+      const tc = [c[0], c[1] + 0.05, c[2]];
+      const home = fromEye([c[0] + 0.5 * hs, c[1] + 0.62, c[2] + rB], tc);
+      const Ld = flight.land || [C[0], 0, C[2] - 6];
       views = {
         swing: home,
-        side: { target: new THREE.Vector3(C[0], C[1], C[2]), az: Math.PI / 2 * hs, pol: Math.PI / 2 - 0.08, r: 1.45 },
-        court: { target: new THREE.Vector3((C[0] + Ld[0]) / 2, 1.0, (C[2] + Ld[2]) / 2), az: -0.22 * hs, pol: 1.02, r: clamp(span * 0.9 + 4.5, 7, 17) }
+        side: fromEye([c[0] + rB * 0.95 * hs, c[1] + 0.3, c[2] - 0.1], tc),
+        court: fromEye([C[0] * 0.45, 3.4, C[2] + 2.6], [(C[0] + Ld[0]) / 2, 0.5, (C[2] + Ld[2]) / 2])
       };
+      sun.position.set(c[0] - 2.2, c[1] + 7, c[2] + 2.8); sun.target.position.set(c[0], 0.6, c[2]); sun.target.updateMatrixWorld();
       if (!orbit) orbit = { target: home.target.clone(), az: home.az, pol: home.pol, r: home.r };
     }
     function desired() {
       if (camMode === 'manual' || !views) return null;
-      if (camMode === 'auto') return curT > 0.04 && flight && flight.res !== 'back' ? views.court : views.swing;
+      if (camMode === 'auto') return curT > 0.12 && flight && flight.res !== 'back' ? views.court : views.swing;
       return views[camMode] || null;
     }
     function camUpdate() {
       const d = desired();
       if (d) {
-        const k = 0.09; let da = d.az - orbit.az; da = Math.atan2(Math.sin(da), Math.cos(da));
+        const k = 0.08; let da = d.az - orbit.az; da = Math.atan2(Math.sin(da), Math.cos(da));
         orbit.az += da * k; orbit.pol += (d.pol - orbit.pol) * k; orbit.r += (d.r - orbit.r) * k; orbit.target.lerp(d.target, k);
       }
       const { az, pol, r, target } = orbit;
@@ -1435,19 +1647,25 @@
       const w = canvas.clientWidth, h = canvas.clientHeight; if (!w || !h) return;
       renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
     }
+    // one finger: orbit · two fingers: pan + pinch zoom · wheel: zoom
     function attachOrbit() {
-      const pts = new Map(); let pinch0 = 0, r0 = 0;
+      const pts = new Map(); let pinch0 = 0, r0 = 0, mid0 = null;
       const manual = () => { if (camMode !== 'manual') { camMode = 'manual'; onManual && onManual(); } };
-      const dist = () => { const [a, b] = [...pts.values()]; return Math.hypot(a.x - b.x, a.y - b.y); };
-      const down = e => { canvas.setPointerCapture && canvas.setPointerCapture(e.pointerId); pts.set(e.pointerId, { x: e.clientX, y: e.clientY }); if (pts.size === 2) { pinch0 = dist(); r0 = orbit.r; } };
+      const two = () => { const [a, b] = [...pts.values()]; return { d: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; };
+      const down = e => { canvas.setPointerCapture && canvas.setPointerCapture(e.pointerId); pts.set(e.pointerId, { x: e.clientX, y: e.clientY }); if (pts.size === 2) { const m = two(); pinch0 = m.d; r0 = orbit.r; mid0 = m; } };
       const move = e => {
         if (!pts.has(e.pointerId)) return; const p = pts.get(e.pointerId); const dx = e.clientX - p.x, dy = e.clientY - p.y; p.x = e.clientX; p.y = e.clientY;
         if (Math.abs(dx) + Math.abs(dy) > 0) manual();
-        if (pts.size === 1) { orbit.az -= dx * 0.008; orbit.pol = clamp(orbit.pol - dy * 0.006, 0.12, 1.55); }
-        else if (pts.size === 2 && pinch0 > 0) orbit.r = clamp(r0 * pinch0 / Math.max(1, dist()), 0.8, 20);
+        if (pts.size === 1) { orbit.az -= dx * 0.008; orbit.pol = clamp(orbit.pol - dy * 0.006, 0.1, 1.56); }
+        else if (pts.size === 2 && pinch0 > 0) {
+          const m = two(); orbit.r = clamp(r0 * pinch0 / Math.max(1, m.d), 0.6, 22);
+          const k = orbit.r * 0.0016, mx = m.x - mid0.x, my = m.y - mid0.y; mid0 = m;
+          const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0), up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+          orbit.target.addScaledVector(right, -mx * k).addScaledVector(up, my * k);
+        }
       };
       const up = e => { pts.delete(e.pointerId); if (pts.size < 2) pinch0 = 0; };
-      const wheel = e => { e.preventDefault(); manual(); orbit.r = clamp(orbit.r * (1 + e.deltaY * 0.0012), 0.8, 20); };
+      const wheel = e => { e.preventDefault(); manual(); orbit.r = clamp(orbit.r * (1 + e.deltaY * 0.0012), 0.6, 22); };
       canvas.addEventListener('pointerdown', down); canvas.addEventListener('pointermove', move);
       ['pointerup', 'pointercancel'].forEach(ev => canvas.addEventListener(ev, up));
       canvas.addEventListener('wheel', wheel, { passive: false });
@@ -1459,9 +1677,11 @@
       THREE = await loadThree();
       if (my !== mountId || !cv.isConnected) throw new Error('stale mount');
       canvas = cv; rep = r; orbit = null; camMode = 'auto';
+      if (THREE.ColorManagement && 'legacyMode' in THREE.ColorManagement) THREE.ColorManagement.legacyMode = false;
       renderer = new THREE.WebGLRenderer({ canvas: cv, antialias: true, preserveDrawingBuffer: true });
       renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
       if ('outputEncoding' in renderer) renderer.outputEncoding = THREE.sRGBEncoding;
+      renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       buildCourt(); buildSwing(); fit();
       detach = attachOrbit();
       if (window.ResizeObserver) { ro = new ResizeObserver(fit); ro.observe(cv); }
@@ -1473,42 +1693,43 @@
       const a = F[i], b = F[i + 1] || a, f = clamp((tt - a.t) / Math.max(1e-6, b.t - a.t), 0, 1);
       const H = a.H.map((v, j) => v + (b.H[j] - v) * f), q = Q.slerp(a.q, b.q, f);
       racket.position.set(H[0], H[1], H[2]); racket.quaternion.set(q[0], q[1], q[2], q[3]);
-      const C = Q.rot(q, [0, 0.25, 0]); shadow.position.set(H[0] + C[0], 0.004, H[2] + C[2]);
-      const cur = i + (f > 0.5 ? 1 : 0);
-      if (ribbon) ribbon.geometry.setDrawRange(0, Math.max(0, Math.min(cur, i1) - i0) * 6);
+      const cur = i + f;
+      if (pathL) pathL.geometry.setDrawRange(0, clamp(Math.floor(cur - p0) + 1, 0, p1 - p0 + 1));
       ghosts.forEach(g => { g.visible = g.userData.i <= cur; });
-      dots.forEach(d => { d.visible = d.userData.i <= cur; });
-      if (peakM) peakM.visible = tt >= -0.002;
+      if (arc) { const fr = clamp((cur - a0) / (a1 - a0), 0, 1), cnt = Math.round(fr * arcSegs) * ARC_RAD * 6; arc.forEach(m => m.geometry.setDrawRange(0, cnt)); }
       // ball
       if (flight && ballM) {
-        const on = tt >= 0 && flight.res !== 'back';
-        ballM.visible = on; ballSh.visible = on;
-        if (!on) { pathL.geometry.setDrawRange(0, 0); if (ringM) ringM.visible = false; }
-        else {
+        const show = !!set.look.peak, fly = tt >= 0 && flight.res !== 'back';
+        if (!fly) {
+          const P = flight.pts[0]; ballM.position.set(P[0], P[1], P[2]); ballM.visible = show; ballSh.visible = false;
+          flightL.geometry.setDrawRange(0, 0); if (ringM) ringM.visible = false;
+        } else {
           const ts = flight.ts; let k = 0; while (k < ts.length - 2 && ts[k + 1] <= tt) k++;
-          const p0 = flight.pts[k], p1 = flight.pts[k + 1] || p0, fr = clamp((tt - ts[k]) / Math.max(1e-6, (ts[k + 1] || ts[k] + 1) - ts[k]), 0, 1);
-          const P = [p0[0] + (p1[0] - p0[0]) * fr, p0[1] + (p1[1] - p0[1]) * fr, p0[2] + (p1[2] - p0[2]) * fr];
-          ballM.position.set(P[0], P[1], P[2]); ballSh.position.set(P[0], 0.006, P[2]);
-          pathL.geometry.setDrawRange(0, k + 2);
+          const q0 = flight.pts[k], q1 = flight.pts[k + 1] || q0, fr = clamp((tt - ts[k]) / Math.max(1e-6, (ts[k + 1] || ts[k] + 1) - ts[k]), 0, 1);
+          const P = [q0[0] + (q1[0] - q0[0]) * fr, q0[1] + (q1[1] - q0[1]) * fr, q0[2] + (q1[2] - q0[2]) * fr];
+          ballM.position.set(P[0], P[1], P[2]); ballSh.position.set(P[0], 0.006, P[2]); ballM.visible = true; ballSh.visible = true;
+          flightL.geometry.setDrawRange(0, k + 2);
           if (ringM) ringM.visible = tt >= flight.tEnd - 1e-3;
         }
       }
     }
     function render() {
       if (!renderer) return; camUpdate();
-      if (ballM) { const k = clamp(camera.position.distanceTo(ballM.position) / 3, 1, 3.2); ballM.scale.setScalar(k); ballSh.scale.setScalar(k); }
+      if (ballM) { const k = clamp(camera.position.distanceTo(ballM.position) / 3.2, 1, 3.4); ballM.scale.setScalar(k); ballSh.scale.setScalar(k); }
       renderer.render(scene, camera);
     }
     function unmount() {
       mountId++;
       if (detach) detach(); detach = null; if (ro) ro.disconnect(); ro = null;
-      if (scene) scene.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => m.dispose()); });
+      if (scene) scene.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => { if (m.map) m.map.dispose(); m.dispose(); }); });
+      if (scene && scene.background && scene.background.dispose) scene.background.dispose();
       if (renderer) { renderer.dispose(); try { renderer.forceContextLoss(); } catch (e) { /* ignore */ } }
-      renderer = null; scene = null; F = []; ghosts = []; dots = []; swingGrp = null; orbit = null; views = null; onManual = null;
+      renderer = null; scene = null; F = []; ghosts = []; swingGrp = null; orbit = null; views = null; onManual = null; arc = null; pathL = null;
+      ghostGeo = ghostEdge = ghostMat = ghostLine = null;
     }
     return {
       mount, unmount, setTime, render,
-      rebuild() { if (renderer) buildSwing(); },
+      rebuild() { if (renderer) { buildSwing(); setTime(curT); } },
       setView(m) { camMode = m; },
       resetView() { camMode = 'auto'; },
       set onManual(fn) { onManual = fn; },
@@ -1669,9 +1890,10 @@
         if (i === st.bi) s.style.setProperty('--p', (pr * 100) + '%');
       });
     }
-    const det = new Detector(thr, pk => { if (active()) Snd.hit(pk / 22); }, pk => {
+    const det = new Detector({ getT: thr, onStroke: L => {
       if (!active()) return;
-      const b = cur(), r = racketKmh(pk);
+      const b = cur(), r = strokeSpeed(L).kmh;
+      Snd.hit(clamp(r / 60, 0, 1));
       st.count++; st.total++; st.best = Math.max(st.best, r); st.balls.push(ballOf(r));
       const R = res[st.bi]; R.done++; R.best = Math.max(R.best, r);
       recordSwing(r, b.stroke, true); if (prevBest > 0 && r > prevBest) st.newBest = true;
@@ -1685,11 +1907,11 @@
         if (left <= 0) blockDone();
         else if (left === 3 && b.reps >= 6) Coach.say('Tiga lagi!', 'Three more!');
       }
-    }, why => {
+    }, onReject: why => {
       if (!active()) return;
       const nx = $('#bNext'); nx.textContent = REJECT_TXT[why]; nx.classList.add('warn');
       clearTimeout(st.cueT); st.cueT = setTimeout(() => { nx.classList.remove('warn'); nx.textContent = nextLabel(st.bi + 1); }, 2600);
-    });
+    } });
     const unsub = Motion.sub(s => det.feed(s));
     const iv = setInterval(() => {
       if (st.paused) return;
@@ -1949,7 +2171,10 @@
       blocks: w.blocks.map(b => b.kind === 'rest' ? Rr(clamp(Math.round(num(b.secs)), 5, 600)) : num(b.secs) > 0 ? T(b.stroke, clamp(Math.round(num(b.secs)), 5, 600)) : P(b.stroke, clamp(Math.round(num(b.reps)), 1, 100))) })) : [];
     const rOk = r => r && typeof r === 'object' && typeof r.id === 'string' && STROKES[r.stroke] && [r.t, r.w, r.q].every(Array.isArray) && r.t.length >= 10 && r.t.length < 400 && r.w.length === r.t.length && r.q.length === r.t.length
       && r.t.every(Number.isFinite) && r.w.every(Number.isFinite) && r.q.every(q => Array.isArray(q) && q.length === 4 && q.every(Number.isFinite));
-    const replays = Array.isArray(o.replays) ? o.replays.filter(rOk).slice(-60).map(r => ({ id: str(r.id, 24), date: num(r.date), stroke: r.stroke, hand: r.hand === 'L' ? 'L' : 'R', k: clamp(num(r.k) || 1, 0.5, 2), star: !!r.star, src: r.src === 'gyro' ? 'gyro' : 'ori', peak: Math.max(0, num(r.peak)), sat: !!r.sat, t: r.t, w: r.w, q: r.q })) : [];
+    const sOk = r => Array.isArray(r.s) && r.s.length === r.t.length && r.s.every(Number.isFinite);
+    const pOk = r => Array.isArray(r.p) && r.p.length === r.t.length && r.p.every(x => Array.isArray(x) && x.length === 3 && x.every(Number.isFinite));
+    const replays = Array.isArray(o.replays) ? o.replays.filter(rOk).slice(-60).map(r => Object.assign({ id: str(r.id, 24), date: num(r.date), stroke: r.stroke, hand: r.hand === 'L' ? 'L' : 'R', k: clamp(num(r.k) || 1, 0.5, 2), star: !!r.star, src: r.src === 'gyro' ? 'gyro' : 'ori', peak: Math.max(0, num(r.peak)), sat: !!r.sat, t: r.t, w: r.w, q: r.q },
+      sOk(r) ? { v: 2, s: r.s, face: r.face === -1 ? -1 : 1, hand3: !!r.hand3, p: pOk(r) ? r.p : null } : {})) : [];
     // settings: keep only known keys with sane values
     const bs = d.settings && typeof d.settings === 'object' ? d.settings : {}, settings = {};
     const ENUM = { soundKind: ['pop', 'crisp', 'whip', 'random'], coachLang: ['id', 'en'], unit: ['kmh', 'mph'], sens: Object.keys(SENS), hand: ['R', 'L'], theme: ['auto', 'light', 'dark'] };
@@ -2119,10 +2344,11 @@
     const lim = Math.round(racketKmh(GYRO_MAX));
     openOv(`<div class="shdr"><h2 class="title">Gimana kecepatan diukur?</h2><button class="link" data-act="close">Tutup</button></div>
       <div class="prose">
-        <p>Giroskop di HP ngukur seberapa cepat HP berputar, 60–200 kali per detik. Pas HP kamu pegang kayak gagang raket, putaran HP = putaran raket.</p>
-        <p><b>Kecepatan raket</b> = kecepatan putar × tuas ${String(LEVER).replace('.', ',')} m, kira-kira jarak dari poros putaran ke sweet spot raket padel.</p>
-        <p><b>Kecepatan bola ≈</b> kecepatan raket × ${String(BALL_RATIO).replace('.', ',')}. Ini perkiraan buat bola yang kena pas di sweet spot, makanya selalu pakai tanda ≈.</p>
-        <p>Kebanyakan giroskop HP mentok di sekitar 2000°/detik, setara ≈${lim} km/h raket. Kalau lewat, angkanya ditandai "≥".</p>
+        <p><b>1. Tanganmu.</b> Akselerometer ngukur seberapa kencang tanganmu dipercepat sepanjang ayunan. Dijumlahin dari awal ayunan, jadinya kecepatan tangan. Tiap kali HP sempat diam (posisi siap, akhir follow-through), hitungannya di-nol-in lagi biar nggak ngaco.</p>
+        <p><b>2. Plus lecutan.</b> Giroskop ngukur seberapa cepat HP berputar. Kepala raket ada sekitar ${Math.round(R_HEAD * 100)} cm di depan tanganmu, jadi pas pergelangan nglecut, kepala raket nyapu busur lebih lebar dan lebih kencang dari tangan. Selisih itulah lecutan yang kamu latih.</p>
+        <p><b>3. Angka raket</b> = kecepatan tangan + lecutan, di detik paling kencang. HP yang nggak punya akselerometer pakai giroskop aja (putaran × ${String(LEVER).replace('.', ',')} m).</p>
+        <p><b>4. Bola ≈</b> raket × ${String(BALL_RATIO).replace('.', ',')}, buat bola diam yang kena pas di tengah muka raket (kayak servis). Bola rally yang datang kencang bisa balik lebih kencang, mishit lebih pelan, jadi anggap ini kira-kira, bukan radar.</p>
+        <p>Kebanyakan giroskop HP mentok di sekitar 2000°/detik. Kalau ayunanmu lewat batas itu, angkanya ditandai "≥": minimal segitu, aslinya bisa lebih kencang.</p>
         <p>Angka ini paling pas buat bandingin progres kamu sendiri dari hari ke hari, bukan pengganti radar. Pernah diukur pakai radar? Samain lewat Kalibrasi kecepatan di Pengaturan.</p>
       </div>`, { close: closeOv });
   }
@@ -2140,32 +2366,54 @@
         <div class="row"><span class="k">${ICON.swing}Ayunan kehitung</span><span class="v" id="sN">0</span></div>
         <div class="row"><span class="k">${ICON.x}Ditolak</span><span class="vs" id="sRej">–</span></div>
         <div class="row"><span class="k">${ICON.boltL}Raket tercepat</span><span class="v or" id="sM">0</span></div>
+        <div class="row"><span class="k">${ICON.sensor}Akselerometer</span><span class="vs" id="sAcc">–</span></div>
         <div class="row"><span class="k">${ICON.sensor}Orientasi α / β / γ</span><span class="vs num" id="sO">–</span></div>
       </div>
-      <p class="note">Pegang HP kayak raket (layar = muka raket). Ayun maju: speedometer naik dan bunyi kalau kehitung. Tarik ke belakang (ancang-ancang) atau puter pergelangan: speedometer diam dan nggak bunyi. Kalau kalibrasi arah belum kekunci, gerak-gerakin HP pelan ke segala arah beberapa detik.</p>
+      <p class="note">Pegang HP kayak raket (atas HP = ujung raket, layar = muka forehand). Forehand atau backhand: bunyi kalau kehitung. Ancang-ancang, balik ke posisi siap, atau cuma muter pergelangan: nggak bunyi. Kalau kalibrasi arah belum kekunci, gerak-gerakin HP pelan ke segala arah beberapa detik.</p>
+      <div class="card" style="padding:14px 16px">
+        <div class="chart-head"><h3>Rekam data mentah</h3><span class="note" id="rawN"></span></div>
+        <p class="sub" style="margin-bottom:10px">Kalau deteksinya masih aneh di HP kamu: rekam 15 detik sambil ayun beberapa forehand & backhand, terus kirim file-nya ke yang bikin aplikasi ini buat disetel.</p>
+        <button class="btn line small" data-act="raw" id="rawBtn">Mulai rekam 15 dtk</button>
+      </div>
       <div class="grow"></div>
       ${simBtn()}
       <div class="row-btns"><button class="btn line small" data-act="recal">Kalibrasi ulang</button><button class="btn line small" data-act="reset">Reset angka</button></div>
     </section>`;
-    let mx = 0, n = 0, rj = 0, curH = 0, curW = 0, raf = 0;
+    let mx = 0, n = 0, rj = 0, curH = 0, curW = 0, raf = 0, rawT = null, rawEnd = 0;
     gaugeTh();
     const live = $('#gLive');
-    const det = new Detector(thr, pk => Snd.hit(pk / 22), pk => { n++; mx = Math.max(mx, racketKmh(pk)); $('#sN').textContent = n; gaugeLast(ballOf(racketKmh(pk))); },
-      why => { rj++; $('#sRej').textContent = `${rj} · ${why === 'short' ? 'kependekan' : 'muter pergelangan'}`; });
-    const unsub = Motion.sub(s => { det.feed(s); curH = Math.max(curH, s.h); curW = Math.max(curW, s.w); });
+    const RJ = { short: 'kependekan', twist: 'muter pergelangan' };
+    const det = new Detector({ getT: thr,
+      onStroke: L => { const r = strokeSpeed(L).kmh; Snd.hit(clamp(r / 60, 0, 1)); n++; mx = Math.max(mx, r); $('#sN').textContent = n; gaugeLast(ballOf(r)); },
+      onReject: why => { rj++; $('#sRej').textContent = `${rj} · ${RJ[why] || why}`; } });
+    const unsub = Motion.sub(s => { det.feed(s); curH = Math.max(curH, s.perp); curW = Math.max(curW, s.w); });
     const loop = () => {
       const h = curH, w = curW; curH *= 0.85; curW *= 0.85;
       $('#sW').textContent = Math.round(w / DEG); $('#sR').textContent = fv(racketKmh(Math.max(0, h))); $('#sM').textContent = fv(mx) + ' ' + U();
       const pc = clamp(ballOf(racketKmh(Math.max(0, h))) / GMAX * 100, 0, 100); live.setAttribute('stroke-dasharray', `${pc.toFixed(1)} 100`); live.style.opacity = pc < 1.5 ? 0 : 1;
       const o = Motion.lastOri(); $('#sO').textContent = o ? `${Math.round(o.a)}° / ${Math.round(o.b)}° / ${Math.round(o.g)}°` : (Motion.isSim() ? 'simulasi' : '–');
       const c = Motion.calStatus(); $('#sCal').textContent = Motion.isSim() ? 'simulasi' : c.locked ? 'Kekunci ✓' : `Lagi kalibrasi… ${Math.min(99, Math.round(c.n / 40 * 100))}%`;
+      const a = Motion.accStatus(); $('#sAcc').textContent = Motion.isSim() ? 'simulasi' : a.has === false ? 'nggak ada (pakai giroskop aja)' : a.n >= 15 ? `aktif ✓${a.sign < 0 ? ' (dibalik)' : ''}` : 'cek gravitasi… diamkan HP sebentar';
       $('#sStat').textContent = Motion.isSim() ? 'Mode simulasi: sensor gerak nggak ketemu di perangkat ini.' : `Giroskop aktif · ${Math.round(Motion.rate())} Hz`;
+      if (rawT) $('#rawN').textContent = `${Math.max(0, Math.ceil((rawEnd - now()) / 1000))} dtk · ${Motion.rawCount()} data`;
       raf = requestAnimationFrame(loop);
     };
     loop(); Wake.on();
-    cleanup = () => { unsub(); cancelAnimationFrame(raf); Wake.off(); };
+    async function rawDone() {
+      rawT = null; const r = Motion.rawStop(); const b = $('#rawBtn'); if (b) { b.disabled = false; b.textContent = 'Rekam lagi'; }
+      if (!r || !r.ev.length) { $('#rawN').textContent = 'nggak ada data'; return; }
+      $('#rawN').textContent = `${r.ev.length} data ✓`;
+      const name = `paaadel-sensor-${dayKey()}-${Date.now().toString(36)}.json`, text = JSON.stringify(r);
+      try {
+        const file = new File([text], name, { type: 'application/json' });
+        if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: 'Data sensor PAAADEL' }); return; }
+      } catch (e) { if (e && e.name === 'AbortError') return; }
+      try { const url = URL.createObjectURL(new Blob([text], { type: 'application/json' })); const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000); toast('File data sensor lagi diunduh'); } catch (e) { toast('Browser ini nggak bisa nyimpen file'); }
+    }
+    cleanup = () => { unsub(); cancelAnimationFrame(raf); Wake.off(); if (rawT) { clearTimeout(rawT); Motion.rawStop(); } };
     actions = {
       back: () => go('settings'), sim: () => Motion.simSwing(),
+      raw: b => { if (rawT || Motion.isSim()) return Motion.isSim() && toast('Butuh sensor beneran, bukan simulasi'); Motion.rawStart(); rawEnd = now() + 15000; b.disabled = true; b.textContent = 'Lagi ngerekam… ayun-ayun ya'; Snd.play('ding'); rawT = setTimeout(() => { Snd.play('done'); rawDone(); }, 15000); },
       recal: () => { Motion.recalibrate(); toast('Kalibrasi diulang. Gerak-gerakin HP pelan ke segala arah.'); },
       reset: () => { mx = 0; n = 0; rj = 0; $('#sN').textContent = 0; $('#sRej').textContent = '–'; const g = $('#gLast'); if (g) g.setAttribute('visibility', 'hidden'); }
     };

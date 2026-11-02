@@ -1,5 +1,5 @@
 /* PAAADEL offline cache: app shell network-first (so updates land), heavy/static files cache-first. */
-const CACHE = 'paaadel-v3';
+const CACHE = 'paaadel-v4';
 const FONTS = ['inter-latin-500-normal', 'inter-latin-600-normal', 'inter-latin-700-normal', 'inter-latin-800-normal', 'inter-latin-900-normal',
   'plus-jakarta-sans-latin-400-normal', 'plus-jakarta-sans-latin-500-normal', 'plus-jakarta-sans-latin-600-normal', 'plus-jakarta-sans-latin-700-normal', 'plus-jakarta-sans-latin-800-normal'].map(f => 'fonts/' + f + '.woff2');
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'vendor/three.min.js',
