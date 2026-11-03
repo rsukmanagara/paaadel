@@ -12,7 +12,7 @@
   const PREVIEW = !!window.PALA_PREVIEW; // design preview page: no sensors, simulated swings only
 
   /* ===================== constants ===================== */
-  const VERSION = '1.1';
+  const VERSION = '1.2';
   const LEVER = 0.62;          // m — gyro-only fallback: rotation centre to racket sweet spot (effective)
   const R_HEAD = 0.32;         // m — hand (phone) to the centre of the racket head
   const BALL_RATIO = 1.35;     // padel ball off the sweet spot vs racket-head speed
@@ -234,6 +234,14 @@
       else { const s = Math.sqrt(1 + m22 - m00 - m11) * 2; qw = (m10 - m01) / s; qx = (m02 + m20) / s; qy = (m12 + m21) / s; qz = s / 4; }
       return Q.norm([qx, qy, qz, qw]);
     }
+  };
+
+  const V3 = {
+    dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
+    cross: (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]],
+    add: (a, b, k = 1) => [a[0] + b[0] * k, a[1] + b[1] * k, a[2] + b[2] * k],
+    scale: (a, k) => [a[0] * k, a[1] * k, a[2] * k],
+    len: a => Math.hypot(a[0], a[1], a[2])
   };
 
   /* ===================== audio ===================== */
@@ -497,7 +505,7 @@
             S1 = 1 / (1 + Math.exp(-u / simSw.tau));
             const bk = 0.35 * Math.exp(-Math.pow((u + 0.32) / 0.13, 2)); // small backswing before the stroke
             const fade = Math.max(0, 1 - (u + 0.5) / 0.4); // start from wherever the racket was
-            theta = -1.9 + simSw.D * S1 - bk + (simSw.th0 + 1.9) * fade; tilt = 0.35 - 0.5 * S1 + 0.25 * Math.max(0, S1 - 0.8) + (simSw.tl0 - 0.35) * fade;
+            theta = -1.9 + simSw.D * S1 - bk + (simSw.th0 + 1.9) * fade; tilt = -0.2 - 0.6 * S1 + 1.6 * S1 * S1 + (simSw.tl0 + 0.2) * fade; // head dips, then low-to-high
           }
         }
         if (!simSw && simRec) { // easy way back to the ready position (~1.2 s)
@@ -508,7 +516,7 @@
         const q = poseQ(theta, tilt, simSw ? simSw.face : 0.15);
         pushOri(t, q);
         // the hand travels round the body just behind the racket; its acceleration feeds the hand-speed part
-        const ph = theta - 0.3, Hp = [0.48 * Math.cos(ph), 0.48 * Math.sin(ph), 1.0 - 0.3 * (S1 - 0.5) * (simSw ? 1 : 0)];
+        const ph = theta - 0.3, Hp = [0.48 * Math.cos(ph), 0.48 * Math.sin(ph), 1.0 + 0.25 * (S1 - 0.5) * (simSw ? 1 : 0)];
         let acc = [0, 0, 0];
         if (simH) {
           const v = Hp.map((c, i) => (c - simH.p[i]) / dt), a = simH.v ? v.map((c, i) => (c - simH.v[i]) / dt) : [0, 0, 0];
@@ -520,7 +528,7 @@
     function simSwing(power) {
       if (!sim) return;
       const D = 4.1 + Math.random() * 0.4, peak = power || (11.5 + Math.random() * 6);
-      simSw = { t0: now(), D, tau: D / (4 * peak), face: (Math.random() * 30 - 4) * DEG, th0: simTh, tl0: simTl }; simRec = null;
+      simSw = { t0: now(), D, tau: D / (4 * peak), face: (Math.random() * 12 + 2) * DEG, th0: simTh, tl0: simTl }; simRec = null;
     }
     return {
       ensure, sub, samples, oriAt, currentQ, simSwing, recalibrate,
@@ -542,25 +550,47 @@
      - take-back vs stroke: a take-back is followed by a stronger push the other way. A stroke that comes straight out of
        a weaker opposite push (take-back → swing) counts at once; a lone push waits ~0.2–0.4 s to see what follows.
      - after a few strokes the detector knows which way "forward" is (towards the net) and ignores pushes going
-       backwards — take-backs and the way back to the ready position — even with a pause before the swing. */
+       backwards or with the racket pointing backwards — take-backs, an overhead's drop behind the back, the way back to
+       the ready position — even with a pause before the swing. Only fairly level head travel teaches "forward"; the drop
+       of a smash moves mostly up/down, so it never does.
+     - overheads (bandeja, víbora, smash = racket head well above the hand at the fastest moment) allow the forearm roll
+       of a víbora, ignore the racket being lifted into position, and an arm-driven bandeja counts on its racket-head
+       speed (hand + whip) even when the racket itself turns slowly. */
   const MIN_SWEEP = { light: 18, medium: 28, full: 38 }; // degrees the racket head turns in one push
   const sweepMin = () => MIN_SWEEP[set.sens] * set.fine * DEG;
   const LOBE_ON = 1.5, LOBE_OFF = 0.6; // rad/s
+  const OVER_ELEV = 25 * DEG;          // racket axis above horizontal at the fastest moment = overhead
   // horizontal (earth) direction the racket head travels at this sample, or null when mostly vertical / unknown
   function headHeading(s) {
     const q = Motion.oriAt(s.t); if (!q) return null;
     const v = Q.rot(q, [-s.wz, 0, s.wx]), hz = Math.hypot(v[0], v[1]);
-    return hz > 0.5 && hz > 0.35 * Math.hypot(v[0], v[1], v[2]) ? [v[0] / hz, v[1] / hz] : null;
+    return hz > 0.5 && hz > 0.6 * Math.hypot(v[0], v[1], v[2]) ? [v[0] / hz, v[1] / hz] : null;
   }
+  // at the fastest moment of a push: racket elevation, how much the head moves up (−1…1), where the racket points (flat)
+  function lobeGeo(L) {
+    if (L.geoT === L.peakT) return L.geo;
+    const s = L.peakS, q = Motion.oriAt(s.t); L.geoT = L.peakT;
+    if (!q) return (L.geo = null);
+    const d = Q.rot(q, [0, 1, 0]), v = Q.rot(q, [-s.wz, 0, s.wx]), vm = Math.hypot(v[0], v[1], v[2]) || 1, dh = Math.hypot(d[0], d[1]);
+    return (L.geo = { elev: Math.asin(clamp(d[2], -1, 1)), up: v[2] / vm, dir: dh > 0.3 ? [d[0] / dh, d[1] / dh] : null });
+  }
+  const pw = L => (L.sp ? L.sp.kmh : racketKmh(L.peak)); // strength of a push for take-back comparisons (km/h)
   class Detector {
-    // o: { getT() → threshold rad/s, onStroke(push), onReject(why, push), onLobe(push) — every fast push, counted or not }
-    constructor(o) { Object.assign(this, o); this.L = null; this.prev = null; this.cand = null; this.lastFire = -1e9; this.lastT = 0; this.fwd = [0, 0]; this.fwdW = 0; this.backN = 0; this.backT = 0; }
+    // o: { getT() → threshold rad/s, over → this drill is an overhead (bool or fn), onStroke(push), onReject(why, push),
+    //      onLobe(push) — every fast push, counted or not, onUpgrade(old, push) — the counted push was only the
+    //      take-back / drop of this stronger one: same count, take this one's numbers }
+    constructor(o) { Object.assign(this, o); this.L = null; this.prev = null; this.cand = null; this.lastF = null; this.lastFire = -1e9; this.lastT = 0; this.fwd = [0, 0]; this.fwdW = 0; this.backN = 0; this.backT = 0; }
+    hint() { return typeof this.over === 'function' ? !!this.over() : !!this.over; }
     opp(a, b) { return a.dx * b.dx + a.dz * b.dz < -0.3; }
-    fwdScore(h) {
-      if (!h || this.fwdW < 1.8) return null;
-      const m = Math.hypot(this.fwd[0], this.fwd[1]); if (m < 0.6 * this.fwdW) return null;
-      return (h[0] * this.fwd[0] + h[1] * this.fwd[1]) / m;
+    fwdDir() {
+      if (this.fwdW < 1.8) return null;
+      const m = Math.hypot(this.fwd[0], this.fwd[1]); return m < 0.6 * this.fwdW ? null : [this.fwd[0] / m, this.fwd[1] / m];
     }
+    fwdScore(h) { const F = this.fwdDir(); return h && F ? h[0] * F[0] + h[1] * F[1] : null; }
+    isOver(L) { const g = lobeGeo(L); return this.hint() ? !g || g.elev > 10 * DEG : !!g && g.elev > OVER_ELEV; }
+    twistOk(L) { return L.twist <= (this.isOver(L) ? 3 : 1.5) * L.sweep; }
+    // head moving mostly up/down (so its heading says nothing) with the racket pointing backwards: an overhead's drop
+    pointsBack(L) { const g = lobeGeo(L), F = this.fwdDir(); return !!(g && g.dir && F && Math.abs(g.up) > 0.5 && g.elev < OVER_ELEV && g.dir[0] * F[0] + g.dir[1] * F[1] < -0.7); }
     feed(s) {
       const t = s.t, dt = this.lastT ? clamp((t - this.lastT) / 1000, 0, 0.05) : 0; this.lastT = t;
       const p = s.perp, vx = -s.wz, vz = s.wx;
@@ -579,32 +609,49 @@
       }
     }
     atPeak(L) { // just past the fastest moment: count right away only if it already looks like a full stroke
-      if (L.sweep < sweepMin() || L.t1 - L.t0 < 50 || L.twist > 1.5 * L.sweep) return;
+      if (L.sweep < sweepMin() || L.t1 - L.t0 < 50 || !this.twistOk(L)) return;
       L.head = headHeading(L.peakS);
-      const f = this.fwdScore(L.head);
-      if (f != null && f < 0) return; // going backwards: decided when the push ends
+      const f = this.fwdScore(L.head), g = lobeGeo(L), over = this.isOver(L);
+      if ((f != null && f < 0) || this.pointsBack(L)) return; // backwards: decided when the push ends
+      if (over && g && g.up > 0.6) return;                    // lifting the racket into position
       const P = L.prev, takeback = P && !P.fired && P.peak > 0.2 * L.peak && P.peak <= 1.1 * L.peak && this.opp(P, L) && L.t0 - P.t1 < 350;
-      if (takeback || (f != null && f > 0.5)) {
+      const overGo = over && this.hint() && g && g.up < 0.35; // overhead drill: racket up, head going forward/down
+      const headGo = f != null && f > 0.5 && (over || !this.hint()); // in an overhead drill a low racket is the drop
+      if (takeback || headGo || overGo) {
         const c = this.cand; this.cand = null;
         if (c && c !== P) this.fire(c);
         L.early = true; this.fire(L);
       }
     }
+    // an arm-driven overhead (bandeja): the racket turns slowly but its head still moves fast enough
+    promote(L, T) {
+      if (L.peak < 0.5 * T || L.sweep < 0.8 * sweepMin() || L.t1 - L.t0 < 80 || !this.isOver(L)) return false;
+      const g = lobeGeo(L); if (g && g.up > 0.6) return false;
+      const sp = strokeSpeed(L); L.sp = sp;
+      if (!sp.hand || sp.kmh < racketKmh(T)) return false;
+      L.promoted = true; return true;
+    }
     close(t) {
       const L = this.L, T = this.getT(); this.L = null;
-      if (L.peak >= T) { if (!L.head) L.head = headHeading(L.peakS); this.onLobe && this.onLobe(L); }
+      const big = !L.fired && (L.peak >= T || this.promote(L, T));
+      if (big && !L.sp) L.sp = strokeSpeed(L);
+      if ((big || L.fired) && !L.head) L.head = headHeading(L.peakS);
       const c = this.cand;
-      if (L.fired) { this.prev = L; return; }
-      if (L.peak < T) { // slow push: the way back after a waiting stroke confirms it
+      if (L.fired) { this.onLobe && this.onLobe(L); this.prev = L; return; }
+      if (!big) { // slow push: the way back after a waiting stroke confirms it
         if (c && this.opp(c, L) && L.t0 - c.t1 < 600 && L.peak > 0.3 * c.peak) { this.cand = null; this.fire(c); }
         this.prev = L; return;
       }
-      L.bad = L.sweep < sweepMin() ? 'short' : L.twist > 1.5 * L.sweep ? 'twist' : null;
-      const f = this.fwdScore(L.head);
-      if (!L.bad && f != null && f < -0.3) L.bad = 'back';
+      const g = lobeGeo(L), f = this.fwdScore(L.head);
+      L.bad = L.sweep < sweepMin() * (L.promoted ? 0.8 : 1) ? 'short' : !this.twistOk(L) ? 'twist' : null;
+      if (!L.bad && ((f != null && f < -0.3) || this.pointsBack(L))) L.bad = 'back';
+      if (!L.bad && this.isOver(L) && g && g.up > 0.6) L.bad = 'lift';
+      this.onLobe && this.onLobe(L);
+      if (window.__detLog) window.__detLog.push({ ev: 'close', peak: +L.peak.toFixed(2), kmh: Math.round(pw(L)), sweep: Math.round(L.sweep / DEG), twist: Math.round(L.twist / DEG), bad: L.bad, f: f && +f.toFixed(2), elev: g && Math.round(g.elev / DEG), up: g && +g.up.toFixed(2), promoted: !!L.promoted });
+      if (!L.bad && !c && this.upgrade(L)) { this.prev = L; return; }
       if (c) {
         if (this.opp(c, L) && L.t0 - c.t1 < 600) {
-          if (!L.bad && L.peak >= 0.9 * c.peak) this.cand = null;          // c was the take-back for this one
+          if (!L.bad && pw(L) >= 0.9 * pw(c)) this.cand = null;          // c was the take-back for this one
           else { this.cand = null; this.fire(c); this.prev = L; return; }   // L is the way back after c
         } else { this.cand = null; this.fire(c); }
       }
@@ -615,6 +662,7 @@
       this.cand = L; this.prev = L;
     }
     reject(L) {
+      if (L.bad === 'lift') return;
       if (L.bad === 'back') { // take-back / recovery. Many big ones in a row = the player turned around: relearn "forward"
         if (L.peak > 1.3 * this.getT()) { this.backN = L.t0 - this.backT < 8000 ? this.backN + 1 : 1; this.backT = L.t0; if (this.backN >= 3) { this.fwd = [0, 0]; this.fwdW = 0; this.backN = 0; } }
         return;
@@ -622,14 +670,27 @@
       if (Math.abs(L.peakT - this.lastFire) < 900) return; // part of a counted stroke
       this.onReject && this.onReject(L.bad, L);
     }
+    // the push counted a moment ago was only the take-back / drop of this clearly stronger one the other way
+    upgrade(L) {
+      const F = this.lastF;
+      if (!F || F === L || !F.early || !this.opp(F, L) || L.t0 - F.t1 > 400) return false;
+      if (strokeSpeed(L).kmh < 1.25 * strokeSpeed(F).kmh) return false;
+      L.fired = true; L.early = true; this.lastF = L; this.lastFire = L.peakT; this.learn(L);
+      if (window.__detLog) window.__detLog.push({ ev: 'upgrade', from: +F.peak.toFixed(2), to: +L.peak.toFixed(2) });
+      this.onUpgrade && this.onUpgrade(F, L); return true;
+    }
     fire(L) {
       if (L.fired) return; L.fired = true;
-      if (L.peakT - this.lastFire < 400) return;
-      this.lastFire = L.peakT; this.backN = 0;
+      if (L.peakT - this.lastFire < 400) { this.upgrade(L); return; }
+      this.lastFire = L.peakT; this.backN = 0; this.lastF = L;
       if (!L.head) L.head = headHeading(L.peakS);
-      if (window.__detLog) window.__detLog.push({ peak: +L.peak.toFixed(2), sweep: Math.round(L.sweep / DEG), twist: Math.round(L.twist / DEG), early: !!L.early, dur: Math.round(L.t1 - L.t0), f: this.fwdScore(L.head) });
-      if (L.head) { const w = L.early || L.peak >= 1.3 * this.getT() ? 1 : 0.6; this.fwd = [this.fwd[0] * 0.85 + L.head[0] * w, this.fwd[1] * 0.85 + L.head[1] * w]; this.fwdW = this.fwdW * 0.85 + w; }
+      if (window.__detLog) { const g = lobeGeo(L); window.__detLog.push({ ev: 'fire', peak: +L.peak.toFixed(2), sweep: Math.round(L.sweep / DEG), twist: Math.round(L.twist / DEG), early: !!L.early, promoted: !!L.promoted, dur: Math.round(L.t1 - L.t0), f: this.fwdScore(L.head), elev: g && Math.round(g.elev / DEG), up: g && +g.up.toFixed(2) }); }
+      this.learn(L);
       this.onStroke && this.onStroke(L);
+    }
+    learn(L) { // "forward" = where counted strokes send the racket head
+      if (!L.head) L.head = headHeading(L.peakS);
+      if (L.head) { const w = L.early || L.peak >= 1.3 * this.getT() ? 1 : 0.6; this.fwd = [this.fwd[0] * 0.85 + L.head[0] * w, this.fwd[1] * 0.85 + L.head[1] * w]; this.fwdW = this.fwdW * 0.85 + w; }
     }
   }
   const REJECT_TXT = {
@@ -681,9 +742,10 @@
   }
   // racket speed of a counted push, right after it (km/h, calibrated)
   function strokeSpeed(L) {
+    if (L.sp) return L.sp;
     const ms = Motion.samples(L.peakT - 1800, L.peakT + 300); if (!ms.length) return { kmh: racketKmh(L.peak), sat: L.sat };
     const { qs } = quatsFor(ms), K = solveKin(ms, qs, false);
-    let best = 0; ms.forEach((s, i) => { if (Math.abs(s.t - L.peakT) <= 90) best = Math.max(best, K.spd[i]); });
+    let best = 0; ms.forEach((s, i) => { if (Math.abs(s.t - L.peakT) <= 120) best = Math.max(best, K.spd[i]); });
     return { kmh: (best || L.peak * LEVER) * 3.6 * set.calib, sat: L.sat, hand: K.hand };
   }
 
@@ -919,7 +981,7 @@
       <p class="sub center cue" id="cue">Lecutin pergelangan kayak nyambuk. Tiap bunyi = 1 rep.</p>
       <div class="stats3"><div><b id="sN">0</b><small>&nbsp;</small><span>Rep</span></div><div><b class="or" id="sBest">–</b><small id="sBestR">&nbsp;</small><span>Terbaik</span></div><div><b id="sC">–</b><small id="sCs">&nbsp;</small><span id="sCl">Konsisten</span></div></div>
       <div class="strip-card"><div class="strip-head"><span class="label">Riwayat ayunan</span><span class="note" id="stripNote"></span></div><svg class="strip" id="strip" viewBox="0 0 320 64" aria-hidden="true"></svg></div>
-      <div class="hint" id="hint" hidden>${ICON.info}<span><b>Belum bunyi juga?</b>Forehand dan backhand dua-duanya kehitung, asal ayunannya cukup panjang dan kencang. Tarik dari belakang, terus lecutin ke depan. Atas HP = ujung raket.</span></div>
+      <div class="hint" id="hint" hidden>${ICON.info}<span><b>Belum bunyi juga?</b>Forehand, backhand, sampai bandeja, víbora, dan smash kehitung, asal ayunannya cukup panjang dan kencang. Tarik dari belakang, terus lecutin ke depan. Atas HP = ujung raket.</span></div>
       <div class="grow"></div>
       <div class="s-bottom">${simBtn()}
         <div class="tools"><button class="chip" data-act="sens">${ICON.sliders}<span id="sensChip"></span></button><button class="chip" data-act="zone" id="zoneChip">${ICON.target}Zona: <span id="zoneLbl"></span></button></div>
@@ -955,11 +1017,15 @@
     const det = new Detector({
       getT: thr,
       onStroke: L => { const sp = strokeSpeed(L); Snd.zoneHit(clamp(sp.kmh / 60, 0, 1), zoneOf(ballOf(sp.kmh))); onSwing(sp.kmh, sp.sat); },
+      onUpgrade: (F, L) => { const sp = strokeSpeed(L); onSwing(sp.kmh, sp.sat, true); },
       onReject: why => { const cue = $('#cue'); cue.textContent = REJECT_TXT[why]; cue.className = 'sub center cue warn'; }
     });
-    function onSwing(r, sat) {
+    function onSwing(r, sat, replace) {
+      if (replace) { // same swing, better numbers (the first push was only its take-back)
+        if (!st.n) return; const ob = st.balls.pop(), zo = zoneOf(ob); st.n--; st.sum -= ob / BALL_RATIO; if (zo) { st.zN--; if (zo === 'in') st.zIn--; }
+      }
       const ball = ballOf(r); st.n++; st.best = Math.max(st.best, r); st.sum += r; st.lastAt = now(); st.balls.push(ball);
-      recordSwing(r, null, true); if (prevBest > 0 && r > prevBest) st.newBest = true;
+      recordSwing(r, null, !replace); if (prevBest > 0 && r > prevBest) st.newBest = true;
       const z = zoneOf(ball); if (z) { st.zN++; if (z === 'in') st.zIn++; }
       $('#hint').hidden = true;
       $('#lb').textContent = (sat ? '≥' : '') + fv(ball); $('#lr').textContent = fv(r);
@@ -1128,15 +1194,15 @@
       Snd.play('ding'); dots[2].classList.add('ding');
       timers.push(setTimeout(() => { const ring = $('#ring'); if (!ring) return; ring.classList.add('live'); ring.innerHTML = '<span class="live-dot"></span>'; }, 250));
       $('#recT').textContent = 'Lagi ngerekam';
-      $('#recS').innerHTML = 'Grip kekunci ✓<br>Pukul kapan aja kamu siap.<br>Ancang-ancangnya ikut kerekam kok.';
+      $('#recS').innerHTML = STROKES[anStroke].over ? 'Grip kekunci ✓<br>Angkat raket, pukul kapan aja kamu siap.<br>Raket jatuh di belakang punggung nggak kehitung kok.' : 'Grip kekunci ✓<br>Pukul kapan aja kamu siap.<br>Ancang-ancangnya ikut kerekam kok.';
       const sb = $('#simBtn'); if (sb) sb.hidden = false;
       Guard.engage();
-      const T0 = thr() * 0.85;
-      // the replay centres on the fastest push around the counted stroke (a take-back is never the fastest)
+      const T0 = thr() * 0.85, kmhOf = L => strokeSpeed(L).kmh;
+      // the replay centres on the fastest racket head around the counted stroke (a take-back or a drop is never the fastest)
       det = new Detector({
-        getT: () => T0,
-        onStroke: L => { if (done) return; if (!best || L.peak > best.peak) best = L; if (!waiting) { waiting = true; Snd.hit(0.7); waitCapture(); } },
-        onLobe: L => { if (!done && best && L.peak > best.peak && L.peakT - best.peakT < 1200) best = L; },
+        getT: () => T0, over: !!STROKES[anStroke].over,
+        onStroke: L => { if (done) return; if (!best || kmhOf(L) > kmhOf(best)) best = L; if (!waiting) { waiting = true; Snd.hit(0.7); waitCapture(); } },
+        onLobe: L => { if (!done && best && L !== best && Math.abs(L.peakT - best.peakT) < 1200 && L.bad !== 'lift' && kmhOf(L) > kmhOf(best)) best = L; },
         onReject: why => { if (!done && !waiting) $('#recS').textContent = 'Belum kehitung. ' + REJECT_TXT[why]; }
       });
       unsub = Motion.sub(s => det.feed(s));
@@ -1184,30 +1250,39 @@
     }
     return out;
   }
-  /* replay v2: the full wind-up (−2 s) and follow-through (+0.9 s); racket pose from the orientation sensor, hand path
-     from the accelerometer (when the phone has one), racket-head speed = hand + whip. The court is turned so the racket
-     head travels towards the net at contact — true for every stroke, forehand or backhand. */
+  /* replay v3: the full wind-up (−2 s) and follow-through (+0.9 s); racket pose from the orientation sensor, hand path
+     from the accelerometer (when the phone has one), racket-head speed = hand + whip, head velocity at contact (vc).
+     The court is turned so the ball leaves towards the net — forehand, backhand or a sliced víbora alike. */
   function buildReplay(pkT, stroke, hand) {
     let ms = Motion.samples(pkT - 2000, pkT + 900); if (ms.length < 20) return null;
     if (ms.length > 360) { const k = Math.ceil(ms.length / 360); ms = ms.filter((s, i) => i % k === 0 || Math.abs(s.t - pkT) < 120); } // ≤ ~120 Hz stored
     const { qs, src } = quatsFor(ms), K = solveKin(ms, qs, true);
     let pi = -1; ms.forEach((s, i) => { if (Math.abs(s.t - pkT) < 160 && (pi < 0 || K.spd[i] > K.spd[pi])) pi = i; });
     if (pi < 0) return null;
-    const tPk = ms[pi].t, vh = K.vh[pi];
-    let hx = vh[0], hy = vh[1];
-    if (Math.hypot(hx, hy) < 0.25 * Math.hypot(vh[0], vh[1], vh[2])) { const n = Q.rot(qs[pi], [0, 0, 1]); hx = n[0]; hy = n[1]; }
+    // the fastest moment falls between two samples: a parabola through the three around the peak finds it (at 60 Hz a
+    // smash turns ~20° between samples, so this steadies the face angle and the ball's launch)
+    let dl = 0;
+    if (pi > 0 && pi < ms.length - 1) { const a = K.spd[pi - 1], b = K.spd[pi], c = K.spd[pi + 1], den = a - 2 * b + c; if (den < 0) dl = clamp(0.5 * (a - c) / den, -0.5, 0.5); }
+    const pj = dl < 0 ? pi - 1 : pi + 1, fr = Math.abs(dl);
+    const tPk = ms[pi].t + ((ms[pj] ? ms[pj].t : ms[pi].t) - ms[pi].t) * fr, over = !!(STROKES[stroke] && STROKES[stroke].over);
+    const vh = fr && K.vh[pj] ? V3.add(V3.scale(K.vh[pi], 1 - fr), K.vh[pj], fr) : K.vh[pi], qPk = fr && qs[pj] ? Q.slerp(qs[pi], qs[pj], fr) : qs[pi];
+    // which side of the phone hit: + = screen (forehand face), − = back. Overheads are hit with the forehand face.
+    const nS = Q.rot(qPk, [0, 0, 1]), dn = V3.dot(nS, vh) / (V3.len(vh) || 1), face = over && Math.abs(dn) < 0.4 ? 1 : dn < 0 ? -1 : 1;
+    const u0 = launchBall(vh, V3.scale(nS, face)).u;
+    let hx = u0[0], hy = u0[1];
+    if (Math.hypot(hx, hy) < 0.2 * V3.len(u0)) { hx = vh[0]; hy = vh[1]; }
+    if (Math.hypot(hx, hy) < 1e-6) { hx = nS[0] * face; hy = nS[1] * face; }
     const qYaw = Q.axis(0, 0, 1, Math.PI / 2 - Math.atan2(hy, hx));
     const qM = Q.axis(1, 0, 0, -Math.PI / 2); // earth (z up, y north) → scene (y up, −z = net)
     const qS = Q.mul(qM, qYaw);
     const qw = qs.map(q => Q.norm(Q.mul(qS, q)));
     for (let i = 1; i < qw.length; i++) { const a = qw[i - 1], b = qw[i]; if (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3] < 0) qw[i] = b.map(c => -c); }
-    // which side of the phone hit: + = screen (forehand face), − = back
-    const nS = Q.rot(qs[pi], [0, 0, 1]), dn = (nS[0] * vh[0] + nS[1] * vh[1] + nS[2] * vh[2]) / (Math.hypot(vh[0], vh[1], vh[2]) || 1);
     const rd = (v, d) => Math.round(v * d) / d;
     let p = null;
     if (K.p) { const p0 = K.p[pi]; p = K.p.map(x => Q.rot(qS, [x[0] - p0[0], x[1] - p0[1], x[2] - p0[2]]).map(c => rd(c, 1000))); }
     return {
-      v: 2, id: 'r' + Date.now().toString(36), date: Date.now(), stroke, hand, k: set.calib, star: false, src, face: dn < 0 ? -1 : 1, hand3: K.hand,
+      v: 3, id: 'r' + Date.now().toString(36), date: Date.now(), stroke, hand, k: set.calib, star: false, src, face, hand3: K.hand,
+      vc: Q.rot(qS, vh).map(c => rd(c, 1000)),
       peak: rd(K.spd[pi] * 3.6 * set.calib, 10), sat: ms.some(s => s.sat && Math.abs(s.t - tPk) < 60),
       t: ms.map(s => rd((s.t - tPk) / 1000, 1000)), w: ms.map(s => rd(s.perp, 100)), s: K.spd.map(x => rd(x * 3.6, 10)),
       q: qw.map(q => q.map(c => rd(c, 10000))), p
@@ -1218,8 +1293,10 @@
   const repSeries = rep => rep.t.map((_, i) => repKmh(rep, i));
 
   /* racket-face metrics at contact (the face that hit: screen side or back side) */
+  // the contact moment (t = 0) sits between two samples: index + fraction
+  function contactAt(rep) { let i = 0; while (i < rep.t.length - 2 && rep.t[i + 1] <= 0) i++; return { i, f: clamp(-rep.t[i] / Math.max(1e-6, rep.t[i + 1] - rep.t[i]), 0, 1) }; }
   function faceMetrics(rep) {
-    const pi = peakIdx(rep), q = rep.q[pi], fs = rep.face || 1;
+    const pi = peakIdx(rep), ca = contactAt(rep), q = Q.slerp(rep.q[ca.i], rep.q[ca.i + 1], ca.f), fs = rep.face || 1;
     const n = Q.rot(q, [0, 0, fs]), d = Q.rot(q, [0, 1, 0]);
     const ser = repSeries(rep), pk = ser[pi]; let j = pi; while (j > 0 && ser[j - 1] > pk * 0.3) j--;
     return { face: Math.round(Math.asin(clamp(n[1], -1, 1)) / DEG), head: Math.round(Math.asin(clamp(d[1], -1, 1)) / DEG), whip: Math.max(0, -rep.t[j]), side: fs };
@@ -1244,27 +1321,39 @@
   }
 
   function ballCard(rep, fl) {
-    const [lbl, cls] = BALL_RES[fl.res], m = v => v.toFixed(1).replace('.', ',');
+    const [lbl, cls] = BALL_RES[fl.res], m = v => v.toFixed(1).replace('.', ','), st = rep.stroke, over = !!STROKES[st].over;
+    const sp = spinInfo(fl), spinTxt = sp.rpm < 400 ? 'hampir nggak ada' : `${sp.kind.toLowerCase()} · ${(Math.round(sp.rpm / 50) * 50).toLocaleString('id-ID')} rpm`;
     const items = [];
     if (fl.netY != null) items.push(['Di net', fl.res === 'net' ? `nabrak ${m(fl.netY)} m` : `+${m(fl.netY - NET_H)} m di atas`]);
     if (fl.res === 'in') items.push(['Jatuh', `${m(fl.depth)} m dari net`]);
     if (fl.res !== 'back') items.push(['Tinggi maks', `${m(fl.apex)} m`]);
-    const lowOver = fl.netY != null && fl.netY - NET_H < 0.6;
-    const fm = rep.src === 'gyro' ? null : faceMetrics(rep), [flo, fhi] = FACE[rep.stroke], fClosed = !!fm && fm.face < flo, fOpen = !!fm && fm.face > fhi;
+    if (fl.res !== 'back') items.push(['Spin', spinTxt]);
+    if (fl.after) items.push(['Abis mantul', `naik ${m(fl.after.h)} m${fl.after.wall === 'side' ? ', ke kaca samping' : fl.after.wall === 'back' ? ', ke kaca belakang' : ''}`]);
+    const clear = fl.netY != null ? fl.netY - NET_H : null, lowOver = clear != null && clear < (over ? 1.0 : 0.6);
+    const fm = rep.src === 'gyro' ? null : faceMetrics(rep), [flo, fhi] = FACE[st], fClosed = !!fm && fm.face < flo, fOpen = !!fm && fm.face > fhi;
+    const lowBounce = fl.after && fl.after.h < 1.1, sideKick = fl.after && fl.after.wall === 'side';
+    const inTip = () => {
+      if (st === 'LB') return fl.depth >= 7 ? 'Lob dalam, mantap! Lawan dipaksa mundur ke kaca.' : 'Lob-nya kurang dalam. Angkat dikit lagi biar jatuh dekat kaca belakang lawan.';
+      if (st === 'VB') return sp.rpm < 900 || Math.abs(sp.side) < 0.25 ? 'Masuk, tapi spinnya kurang. Potong bolanya dari samping (sisi luar bola) sambil ayun ke depan-bawah biar ada spin samping.'
+        : sideKick ? 'Víbora mantap! Slice + spin samping bikin bola mantul rendah ke kaca samping.' : 'Víbora masuk dan ada spinnya. Arahin lebih ke samping biar mantulnya nyari kaca samping.';
+      if (st === 'BJ') return lowBounce ? 'Bandeja aman: masuk, mantulnya rendah, lawan susah nyerang balik.' : 'Masuk, tapi mantulnya agak tinggi. Potong bolanya lebih banyak (slice) biar mantulnya rendah.';
+      if (st === 'SM') return fl.after && fl.after.h >= 1.6 ? 'Smash masuk dan mantulnya tinggi. Mantap!' : 'Smash masuk. Pukul lebih ke bawah biar mantulnya tinggi dan susah dibalikin.';
+      return lowOver ? 'Mantap! Rendah di atas net dan masuk.' : 'Masuk, tapi agak tinggi di atas net. Tutup dikit muka raketnya biar lebih tajam.';
+    };
     const tip = {
-      in: rep.stroke === 'LB' ? (fl.depth >= 7 ? 'Lob dalam, mantap! Lawan dipaksa mundur ke kaca.' : 'Lob-nya kurang dalam. Angkat dikit lagi biar jatuh dekat kaca belakang lawan.')
-        : lowOver ? 'Mantap! Rendah di atas net dan masuk.' : 'Masuk, tapi agak tinggi di atas net. Tutup dikit muka raketnya biar lebih tajam.',
-      net: fClosed ? 'Bola nyangkut di net karena muka raketnya ketutup. Buka dikit biar bola naik.' : 'Bola nyangkut di net. Muka raketnya udah oke, jadi ayun lebih dari bawah ke atas atau lebih kencang.',
+      in: inTip(),
+      net: over ? (fClosed ? 'Nyangkut net, muka raketnya ketutup. Buat bandeja/víbora muka raket agak dibuka, terus potong bolanya ke depan, jangan dibanting ke bawah.' : 'Nyangkut net. Kena bolanya lebih di depan-atas badan dan dorong ke depan, jangan cuma motong ke bawah.')
+        : fClosed ? 'Bola nyangkut di net karena muka raketnya ketutup. Buka dikit biar bola naik.' : 'Bola nyangkut di net. Muka raketnya udah oke, jadi ayun lebih dari bawah ke atas atau lebih kencang.',
       short: fClosed ? 'Bola jatuh sebelum net karena muka raketnya ketutup. Buka dikit dan ayun lebih ke depan.' : fOpen ? 'Bola kebanyakan naik dan jatuh sebelum net. Tutup dikit muka raketnya dan dorong lebih ke depan.' : 'Bola jatuh sebelum net. Muka raketnya udah oke, jadi ayun lebih kencang dan lebih ke depan.',
       long: fOpen ? 'Kepanjangan karena muka raketnya kebuka banget. Tutup dikit atau kurangi tenaga.' : 'Kepanjangan, bola kena kaca belakang langsung. Muka raketnya udah oke, jadi kurangi tenaga atau ayun lebih rata ke depan.',
-      wide: 'Melebar, bola kena kaca samping langsung. Cek arah muka raket pas kena.',
+      wide: 'Melebar, bola kena kaca samping sebelum mantul. Kurangi spin sampingnya atau arahin lebih ke tengah.',
       back: 'Bola nggak maju ke depan. Pastikan muka raket ngadep ke depan pas kena, jangan kebuka ke atas atau miring.'
     }[fl.res];
     return `<div class="card">
       <div class="chart-head"><h3>Arah bola</h3><span class="pill ${cls}">${lbl}</span></div>
       ${items.length ? `<div class="face-meta ball-meta">${items.map(([k, v]) => `<span>${k}<b>${v}</b></span>`).join('')}</div>` : ''}
       <p class="sub" style="margin-top:12px">${tip}</p>
-      <p class="note" style="padding:8px 0 0">Perkiraan dari kecepatan, sudut muka raket, dan arah ayunan pas kena; spin dan posisi badanmu belum dihitung. Putar replay-nya: bola kuning terbang ke lapangan lawan.</p>
+      <p class="note" style="padding:8px 0 0">Perkiraan dari kecepatan, sudut muka raket, dan arah ayunan pas kena. Bagian ayunan yang motong bola (slice, potongan samping víbora) jadi spin: backspin bikin bola melayang, spin samping bikin melengkung dan mantul ke samping.${over ? ' Buat overhead, tenaga bola lob yang datang ikut dihitung.' : ''} Posisi badanmu belum dihitung.</p>
     </div>`;
   }
 
@@ -1293,7 +1382,7 @@
       ${ballCard(rep, fl)}
       ${faceCard(rep)}
       <p class="note">Sisi oranye = muka forehand (layar HP), sisi gelap = muka backhand. Garis oranye = bagian ayunan paling kencang, di situ harusnya bola kena; bola kuning = titik kena dan arah bolanya. Geser buat muter, dua jari buat geser, cubit buat zoom.${rep.p ? ' Gerak tangan dari akselerometer, arah raket dari sensor orientasi.' : ' Posisi tangan diperkirakan; arah raket dan kecepatannya dari sensor HP.'}</p>
-      <button class="btn teal" data-act="done">Selesai</button>
+      <div class="r-actions"><button class="btn line" data-act="again" aria-label="Ulangi ${STROKES[rep.stroke].n}">${ICON.reset}Ulangi</button><button class="btn teal" data-act="done">Selesai</button></div>
     </section>`;
     const SER = repSeries(rep), PK = Math.max(...SER);
     const wAt = tt => { let i = 0; while (i < rep.t.length - 2 && rep.t[i + 1] < tt) i++; const f = clamp((tt - rep.t[i]) / Math.max(1e-6, rep.t[i + 1] - rep.t[i]), 0, 1); return SER[i] + (SER[i + 1] - SER[i]) * f; };
@@ -1319,7 +1408,7 @@
     const setPlay = v => { playing = v; const b = $('#playBtn'); b.innerHTML = v ? ICON.pause : ICON.play; b.setAttribute('aria-label', v ? 'Jeda' : 'Putar'); if (v && t >= T1 - 1e-3) t = T0; last = now(); };
     function frame() {
       const n = now(), dt = Math.min(0.05, (n - last) / 1000); last = n;
-      if (playing) { t += dt * rate; if (t >= T1) { t = T1; setPlay(false); } }
+      if (playing) { t += dt * (t > lastS ? Math.max(rate, 0.5) : rate); if (t >= T1) { t = T1; setPlay(false); } }
       if (ready) { R3D.setTime(t); R3D.render(); }
       ui(); raf = requestAnimationFrame(frame);
     }
@@ -1334,6 +1423,7 @@
     actions = {
       back: () => go('analysis', { tab: p.fresh ? 'new' : 'rep' }),
       done: () => go('analysis', { tab: p.fresh ? 'new' : 'rep' }),
+      again: () => { anStroke = rep.stroke; startWith(() => go('record')); }, // same stroke, straight back to recording
       play: () => setPlay(!playing),
       peak: () => { setPlay(false); t = 0; },
       rate: b => { rate = +b.dataset.k; app.querySelectorAll('[data-act="rate"]').forEach(x => x.setAttribute('aria-pressed', +x.dataset.k === rate)); },
@@ -1371,15 +1461,50 @@
 
   /* ===================== swing geometry & ball flight (pure, no three.js) ===================== */
   const peakIdx = rep => { let pi = 0; rep.t.forEach((tt, i) => { if (Math.abs(tt) < Math.abs(rep.t[pi])) pi = i; }); return pi; };
+  const NET_H = 0.88, BALL_R = 0.033, BALL_M = 0.057;
+  const AIR = 0.5 * 1.2 * Math.PI * BALL_R * BALL_R / BALL_M; // ½·ρ·A / m
+  const LOB_IN = [0, -8.4, 7.1]; // a typical lob arriving for a bandeja / víbora / smash (scene frame, m/s)
+  /* ball off the racket: the face pushes it along its normal (≈1.35× that part of the racket-head speed); the part of
+     the swing that brushes across the face — the cut of a bandeja / víbora, the low-to-high of a topspin — adds a little
+     speed that way and spins the ball (the contact point is dragged along: ball surface ≈ 0.6 × the brushing speed). */
+  function launchBall(V, n) {
+    const sp = V3.len(V) || 1e-6, vn0 = V3.dot(V, n), Vt = V3.add(V, n, -vn0), vn = Math.max(vn0, 0.2 * sp);
+    return { u: V3.add(V3.scale(n, BALL_RATIO * vn), Vt, 0.4), w: V3.scale(V3.cross(Vt, n), 0.6 / BALL_R) };
+  }
+  // head velocity at contact (scene frame, m/s, uncalibrated) for replays recorded before it was stored
+  function estContactVel(rep, pi) {
+    const i0 = Math.max(0, pi - 1), i1 = Math.min(rep.t.length - 1, pi + 1), dt = Math.max(1e-3, rep.t[i1] - rep.t[i0]);
+    let d = Q.mul(rep.q[i1], Q.conj(rep.q[i0])); if (d[3] < 0) d = d.map(c => -c);
+    const sh = Math.hypot(d[0], d[1], d[2]), ang = 2 * Math.atan2(sh, d[3]), w = sh > 1e-9 ? [d[0] / sh * ang / dt, d[1] / sh * ang / dt, d[2] / sh * ang / dt] : [0, 0, 0];
+    let V = V3.cross(w, V3.scale(Q.rot(rep.q[pi], [0, 1, 0]), rep.p ? R_HEAD : LEVER));
+    if (rep.p) V = V3.add(V, V3.add(rep.p[i1], rep.p[i0], -1), 1 / dt);
+    const s = (rep.s ? rep.s[pi] : racketKmh(rep.w[pi], 1)) / 3.6, l = V3.len(V);
+    return l > 1e-6 ? V3.scale(V, s / l) : V3.scale(Q.rot(rep.q[pi], [0, 0, rep.face || 1]), s);
+  }
+  // older replays faced the court by racket-head travel; turn them so the ball leaves towards the net like new ones
+  const alignCache = new Map();
+  function aligned(rep) {
+    if (rep.vc) return rep;
+    const key = rep.id + '|' + rep.t.length; if (alignCache.has(key)) return alignCache.get(key);
+    const pi = peakIdx(rep), V = estContactVel(rep, pi), u = launchBall(V, Q.rot(rep.q[pi], [0, 0, rep.face || 1])).u;
+    const out = Object.assign({}, rep, { vc: V });
+    if (Math.hypot(u[0], u[2]) > 0.2 * V3.len(u)) {
+      const qA = Q.axis(0, 1, 0, Math.atan2(u[0], -u[2]));
+      out.q = rep.q.map(q => Q.mul(qA, q)); out.p = rep.p && rep.p.map(x => Q.rot(qA, x)); out.vc = Q.rot(qA, V);
+    }
+    alignCache.set(key, out); return out;
+  }
   // racket pose is measured (orientation). Hand position: measured path (accelerometer) anchored at a modelled contact
-  // point, or — without one — modelled as a hand on an arm from the shoulder.
+  // point, or — without one — modelled as a hand on an arm from the shoulder. Overheads are played around the service
+  // line with the contact point above the head.
   const HEAD_Y = 0.29, TIP_Y = 0.425; // racket: hand at 0, head centre and tip along the racket axis (m)
-  function computeFrames(rep) {
-    const over = !!STROKES[rep.stroke].over, hs = rep.hand === 'L' ? -1 : 1, st = rep.stroke;
-    const pz = st === 'VL' ? 3.2 : over ? 5.4 : 7.6, px = 1.3 * hs;
-    const Sh = [px + 0.19 * hs, over ? 1.5 : 1.42, pz];
+  const POS_Z = { VL: 3.2, BJ: 6.8, VB: 6.5, SM: 5.5 };
+  function computeFrames(rep0) {
+    const rep = aligned(rep0), over = !!STROKES[rep.stroke].over, hs = rep.hand === 'L' ? -1 : 1, st = rep.stroke;
+    const pz = POS_Z[st] || 7.6, px = 1.3 * hs;
+    const Sh = [px + 0.19 * hs, over ? 1.55 : 1.42, pz], arm = over ? 0.62 : 0.58;
     const bias = over ? [0, 0.3, -0.2] : [0, -0.8, -0.3];
-    const model = q => { const d = Q.rot(q, [0, 1, 0]); const a = [d[0] + bias[0], d[1] + bias[1], d[2] + bias[2]]; const L = Math.hypot(a[0], a[1], a[2]) || 1; return [Sh[0] + 0.58 * a[0] / L, Math.max(0.32, Sh[1] + 0.58 * a[1] / L), Sh[2] + 0.58 * a[2] / L]; };
+    const model = q => { const d = Q.rot(q, [0, 1, 0]); const a = [d[0] + bias[0], d[1] + bias[1], d[2] + bias[2]]; const L = Math.hypot(a[0], a[1], a[2]) || 1; return [Sh[0] + arm * a[0] / L, Math.max(0.32, Sh[1] + arm * a[1] / L), Sh[2] + arm * a[2] / L]; };
     let Hs;
     if (rep.p && rep.p.length === rep.q.length) {
       const pi = peakIdx(rep), A = model(rep.q[pi]);
@@ -1396,50 +1521,86 @@
       return { t: rep.t[i], w: rep.w[i], kmh: ser[i], q, H, C: at(HEAD_Y), tip: at(TIP_Y), thr: at(0.12), W: Q.rot(q, [1, 0, 0]) };
     });
   }
-  const NET_H = 0.88, BALL_R = 0.033;
   const BALL_RES = { in: ['Masuk', 'ok'], net: ['Nyangkut net', 'warn'], short: ['Nggak nyampe net', 'warn'], long: ['Kepanjangan', 'warn'], wide: ['Melebar', 'warn'], back: ['Nggak maju', 'warn'] };
   const flightCache = new Map();
-  // launch ≈ 70% face normal + 30% racket-head path, speed = estimated ball speed; gravity + air drag
+  /* flight: gravity, air drag and the Magnus push of the spin (backspin lifts, sidespin curves). In the opponent's court
+     the ball bounces (turf: 74% of the drop speed back; friction with the spin — a slice skids low, topspin kicks on, a
+     víbora's sidespin kicks sideways) and is followed to the glass. */
   function ballFlight(rep) {
     const key = rep.id + '|' + rep.k + '|' + rep.t.length; if (flightCache.has(key)) return flightCache.get(key);
-    const F = computeFrames(rep), pi = peakIdx(rep), f = F[pi], n = Q.rot(f.q, [0, 0, rep.face || 1]);
-    const a = F[Math.max(0, pi - 1)].C, b = F[Math.min(F.length - 1, pi + 1)].C;
-    let v = [b[0] - a[0], b[1] - a[1], b[2] - a[2]]; const vl = Math.hypot(v[0], v[1], v[2]) || 1; v = v.map(c => c / vl);
-    let dir = [0.7 * n[0] + 0.3 * v[0], 0.7 * n[1] + 0.3 * v[1], 0.7 * n[2] + 0.3 * v[2]]; const dl = Math.hypot(dir[0], dir[1], dir[2]) || 1; dir = dir.map(c => c / dl);
-    const sp = ballOf(repKmh(rep, pi)) / 3.6;
-    let p = f.C.map((c, i) => c + n[i] * 0.05), vel = dir.map(c => c * sp), tt = 0, res = null, netY = null, apex = p[1], land = null, step = 0;
-    const pts = [p.slice()], ts = [0], K = 0.019, G = 9.81, dt = 1 / 240;
-    if (vel[2] > -0.3) res = 'back';
+    const R = aligned(rep), F = computeFrames(rep), ca = contactAt(rep), F0 = F[ca.i], F1 = F[ca.i + 1] || F0;
+    const n = Q.rot(Q.slerp(F0.q, F1.q, ca.f), [0, 0, rep.face || 1]), Cc = V3.add(V3.scale(F0.C, 1 - ca.f), F1.C, ca.f);
+    const Ln = launchBall(V3.scale(R.vc, rep.k || 1), n), spin0 = Ln.w.slice();
+    // an overhead answers a lob: the falling ball (≈40 km/h, coming down at ~50°) bounces off the face too (×0.35)
+    if (STROKES[rep.stroke].over) { const vn = V3.dot(LOB_IN, n); if (vn < 0) Ln.u = V3.add(Ln.u, n, -(BALL_RATIO - 1) * vn); }
+    let p = V3.add(Cc, n, 0.052), vel = Ln.u.slice(), w = Ln.w.slice(), tt = 0, res = null, netY = null, apex = p[1], land = null, tLand = null, step = 0;
+    const pts = [p.slice()], ts = [0], G = 9.81, dt = 1 / 240, KD = AIR * 0.55, sp = V3.len(vel);
+    const accel = (v, w) => {
+      const s = V3.len(v); let a = [-KD * s * v[0], -G - KD * s * v[1], -KD * s * v[2]];
+      const wl = V3.len(w);
+      if (wl > 1 && s > 0.5) { const S = BALL_R * wl / s, CL = 1 / (2.022 + 0.981 / S), m = V3.cross(w, v), ml = V3.len(m); if (ml > 1e-9) a = V3.add(a, m, AIR * CL * s * s / ml); }
+      return a;
+    };
+    const push = (force) => { if (++step % 4 === 0 || force) { pts.push(p.slice()); ts.push(tt); } };
+    if (Math.hypot(vel[0], vel[2]) < 0.2 * sp || vel[2] > -0.3) res = 'back';
+    // 1) to the first touch: net, ground, glass
     while (!res && tt < 4) {
-      const s2 = Math.hypot(vel[0], vel[1], vel[2]);
-      const np = [p[0] + vel[0] * dt, p[1] + vel[1] * dt, p[2] + vel[2] * dt];
-      vel = [vel[0] - K * s2 * vel[0] * dt, vel[1] - (G + K * s2 * vel[1]) * dt, vel[2] - K * s2 * vel[2] * dt];
-      tt += dt;
+      const np = V3.add(p, vel, dt); vel = V3.add(vel, accel(vel, w), dt); w = V3.scale(w, 1 - dt / 6); tt += dt;
       if (p[2] > 0 && np[2] <= 0) { // crossing the net plane
         const fr = p[2] / (p[2] - np[2]), y = p[1] + (np[1] - p[1]) * fr; netY = y;
         if (y < NET_H + BALL_R) { res = 'net'; np[0] = p[0] + (np[0] - p[0]) * fr; np[1] = y; np[2] = 0.06; }
       }
-      if (!res && np[1] <= BALL_R) { np[1] = BALL_R; land = np.slice(); res = np[2] >= 0 ? 'short' : Math.abs(np[0]) <= 5 ? 'in' : 'wide'; }
+      if (!res && np[1] <= BALL_R) { np[1] = BALL_R; land = np.slice(); tLand = tt; res = np[2] >= 0 ? 'short' : Math.abs(np[0]) <= 5 ? 'in' : 'wide'; }
       if (!res && np[2] <= -10 + BALL_R) { np[2] = -10 + BALL_R; res = 'long'; }
       if (!res && np[2] < 0 && Math.abs(np[0]) >= 5 - BALL_R) res = 'wide';
-      p = np; apex = Math.max(apex, p[1]);
-      if (++step % 4 === 0 || res) { pts.push(p.slice()); ts.push(tt); }
+      p = np; apex = Math.max(apex, p[1]); push(!!res);
     }
     if (!res) res = 'long';
-    if (res !== 'back' && res !== 'in' && res !== 'short') { // drop from the net / wall to the ground
+    let after = null;
+    if (res === 'in') { // 2) the bounce, then on to the glass (or a second bounce)
+      const vy = vel[1], vc = [vel[0] + BALL_R * w[2], vel[2] - BALL_R * w[0]], vcl = Math.hypot(vc[0], vc[1]);
+      vel[1] = -0.74 * vy;
+      if (vcl > 1e-6) {
+        const dv = Math.min(0.55 * 1.74 * Math.abs(vy), 0.4 * vcl), ux = vc[0] / vcl, uz = vc[1] / vcl;
+        vel[0] -= dv * ux; vel[2] -= dv * uz; w[0] += 1.5 * dv * uz / BALL_R; w[2] -= 1.5 * dv * ux / BALL_R;
+      }
+      after = { h: 0, wall: null, x0: p[0] }; let t2 = 0, tw = null;
+      while (t2 < 1.6) {
+        const np = V3.add(p, vel, dt); vel = V3.add(vel, accel(vel, w), dt); w = V3.scale(w, 1 - dt / 6); tt += dt; t2 += dt;
+        if (tw == null) {
+          if (Math.abs(np[0]) >= 5 - BALL_R && np[1] < 3) { np[0] = Math.sign(np[0]) * (5 - BALL_R); vel[0] *= -0.6; after.wall = 'side'; tw = t2; }
+          else if (np[2] <= -10 + BALL_R && np[1] < 3) { np[2] = -10 + BALL_R; vel[2] *= -0.6; after.wall = 'back'; tw = t2; }
+        }
+        if (np[1] <= BALL_R && vel[1] < 0) { np[1] = BALL_R; p = np; push(true); break; }
+        p = np; after.h = Math.max(after.h, p[1]); push(false);
+        if (tw != null && t2 - tw > 0.45) break;
+      }
+      push(true);
+    } else if (res !== 'back' && res !== 'short') { // drop from the net / glass to the ground
       let y = p[1], vy = Math.min(0, vel[1]) * 0.3, t2 = tt; const z = res === 'net' ? 0.06 : p[2], x = p[0];
       while (y > BALL_R) { vy -= G / 60; y = Math.max(BALL_R, y + vy / 60); t2 += 1 / 60; pts.push([x, y, z]); ts.push(t2); }
-      land = [x, BALL_R, z]; tt = t2;
+      if (!land) land = [x, BALL_R, z]; tt = t2;
     }
-    const out = { pts, ts, res, netY, apex, land, depth: land && land[2] < 0 ? -land[2] : null, tEnd: tt, speed: sp };
+    if (tLand == null && land) tLand = tt;
+    const out = { pts, ts, res, netY, apex, land, depth: land && land[2] < 0 ? -land[2] : null, tEnd: tt, tLand, speed: sp, spin: spin0, dir: [Ln.u[0], 0, Ln.u[2]], after };
     flightCache.set(key, out); return out;
+  }
+  // spin type relative to the ball's direction: backspin (slice) / topspin around the sideways axis, sidespin around "up"
+  function spinInfo(fl) {
+    const w = fl.spin, tot = V3.len(w), rpm = tot * 60 / (2 * Math.PI);
+    if (rpm < 400) return { rpm, kind: 'Hampir tanpa spin', side: 0, back: 0 };
+    const dl = Math.hypot(fl.dir[0], fl.dir[2]) || 1, d = [fl.dir[0] / dl, 0, fl.dir[2] / dl];
+    const back = V3.dot(w, V3.cross(d, [0, 1, 0])) / tot, side = w[1] / tot;
+    const s = Math.abs(side) > 0.3;
+    const kind = Math.abs(side) > 0.8 ? 'Spin samping' : back >= 0 ? (s ? 'Slice + samping' : 'Slice') : (s ? 'Topspin + samping' : 'Topspin');
+    return { rpm, kind, side, back };
   }
 
   /* ===================== 3D replay engine (three.js, loaded on demand) ===================== */
   const R3D = (() => {
     let THREEp = null, THREE = null, renderer = null, scene = null, camera = null, canvas = null, rep = null, ro = null;
     let F = [], pi = 0, racket = null, swingGrp = null, sun = null, ghosts = [], pathL = null, p0 = 0, p1 = 0;
-    let arc = null, a0 = 0, a1 = 0, arcSegs = 0, ballM = null, ballSh = null, flightL = null, ringM = null, flight = null;
+    let arc = null, a0 = 0, a1 = 0, arcSegs = 0, ballM = null, ballSh = null, flightL = null, ringM = null, flight = null, spinAx = null, spinVis = 0;
     let orbit = null, views = null, detach = null, camMode = 'auto', curT = 0, onManual = null;
     const ARC_RAD = 8;
     function loadThree() {
@@ -1599,7 +1760,11 @@
       racket = makeRacket(); swingGrp.add(racket);
       // ball: waits at the contact point, flies after the peak
       flight = ballFlight(rep);
-      ballM = new THREE.Mesh(new THREE.SphereGeometry(BALL_R, 20, 14), new THREE.MeshStandardMaterial({ color: 0xe3f23a, roughness: 0.55, emissive: 0x4a5200, emissiveIntensity: 0.4 }));
+      // padel ball with its seam, so the spin shows (slowed down to stay readable)
+      const seam = canvasTex(128, 64, (g, w, h) => { g.fillStyle = '#e3f23a'; g.fillRect(0, 0, w, h); g.strokeStyle = '#fbfff0'; g.lineWidth = 3.2; g.beginPath(); for (let x = 0; x <= w; x += 2) { const y = h / 2 + h * 0.27 * Math.sin(x / w * Math.PI * 4); x ? g.lineTo(x, y) : g.moveTo(x, y); } g.stroke(); });
+      ballM = new THREE.Mesh(new THREE.SphereGeometry(BALL_R, 24, 16), new THREE.MeshStandardMaterial({ map: seam, roughness: 0.55, emissive: 0x4a5200, emissiveIntensity: 0.35 }));
+      const wl = V3.len(flight.spin || [0, 0, 0]);
+      spinAx = wl > 20 ? new THREE.Vector3(flight.spin[0] / wl, flight.spin[1] / wl, flight.spin[2] / wl) : null; spinVis = Math.min(wl * 0.08, 26);
       ballM.visible = !!L.peak; swingGrp.add(ballM);
       ballSh = new THREE.Mesh(new THREE.CircleGeometry(0.05, 18), basic(0x000000, { transparent: true, opacity: 0.25, depthWrite: false })); ballSh.rotation.x = -Math.PI / 2; ballSh.visible = false; swingGrp.add(ballSh);
       flightL = new THREE.Line(new THREE.BufferGeometry().setFromPoints(flight.pts.map(p => V(p))), new THREE.LineBasicMaterial({ color: 0xf2ff5a, transparent: true, opacity: 0.9 }));
@@ -1701,15 +1866,16 @@
       if (flight && ballM) {
         const show = !!set.look.peak, fly = tt >= 0 && flight.res !== 'back';
         if (!fly) {
-          const P = flight.pts[0]; ballM.position.set(P[0], P[1], P[2]); ballM.visible = show; ballSh.visible = false;
+          const P = flight.pts[0]; ballM.position.set(P[0], P[1], P[2]); ballM.visible = show; ballSh.visible = false; ballM.quaternion.set(0, 0, 0, 1);
           flightL.geometry.setDrawRange(0, 0); if (ringM) ringM.visible = false;
         } else {
           const ts = flight.ts; let k = 0; while (k < ts.length - 2 && ts[k + 1] <= tt) k++;
           const q0 = flight.pts[k], q1 = flight.pts[k + 1] || q0, fr = clamp((tt - ts[k]) / Math.max(1e-6, (ts[k + 1] || ts[k] + 1) - ts[k]), 0, 1);
           const P = [q0[0] + (q1[0] - q0[0]) * fr, q0[1] + (q1[1] - q0[1]) * fr, q0[2] + (q1[2] - q0[2]) * fr];
           ballM.position.set(P[0], P[1], P[2]); ballSh.position.set(P[0], 0.006, P[2]); ballM.visible = true; ballSh.visible = true;
+          if (spinAx) ballM.quaternion.setFromAxisAngle(spinAx, spinVis * tt);
           flightL.geometry.setDrawRange(0, k + 2);
-          if (ringM) ringM.visible = tt >= flight.tEnd - 1e-3;
+          if (ringM) ringM.visible = tt >= (flight.tLand != null ? flight.tLand : flight.tEnd) - 1e-3;
         }
       }
     }
@@ -1890,13 +2056,15 @@
         if (i === st.bi) s.style.setProperty('--p', (pr * 100) + '%');
       });
     }
-    const det = new Detector({ getT: thr, onStroke: L => {
+    const det = new Detector({ getT: thr, over: () => { const b = cur(); return !!(b && b.stroke && STROKES[b.stroke].over); }, onStroke: L => {
       if (!active()) return;
-      const b = cur(), r = strokeSpeed(L).kmh;
-      Snd.hit(clamp(r / 60, 0, 1));
-      st.count++; st.total++; st.best = Math.max(st.best, r); st.balls.push(ballOf(r));
-      const R = res[st.bi]; R.done++; R.best = Math.max(R.best, r);
-      recordSwing(r, b.stroke, true); if (prevBest > 0 && r > prevBest) st.newBest = true;
+      const b = cur(), r = strokeSpeed(L).kmh, up = !!L.upgradeOf;
+      if (!up) Snd.hit(clamp(r / 60, 0, 1));
+      if (up) { if (!st.count) return; st.balls.pop(); } else { st.count++; st.total++; }
+      st.best = Math.max(st.best, r); st.balls.push(ballOf(r));
+      const R = res[st.bi]; if (!up) R.done++; R.best = Math.max(R.best, r);
+      recordSwing(r, up ? null : b.stroke, !up); if (prevBest > 0 && r > prevBest) st.newBest = true;
+      if (up) { $('#rsL').textContent = '≈' + fv(ballOf(r)); $('#rsLr').textContent = fv(r) + ' raket'; $('#rsB').textContent = '≈' + fv(ballOf(st.best)); $('#rsBr').textContent = fv(st.best) + ' raket'; return; }
       $('#rsL').textContent = '≈' + fv(ballOf(r)); $('#rsLr').textContent = fv(r) + ' raket';
       $('#rsB').textContent = '≈' + fv(ballOf(st.best)); $('#rsBr').textContent = fv(st.best) + ' raket';
       $('#rsT').textContent = st.total;
@@ -1907,7 +2075,7 @@
         if (left <= 0) blockDone();
         else if (left === 3 && b.reps >= 6) Coach.say('Tiga lagi!', 'Three more!');
       }
-    }, onReject: why => {
+    }, onUpgrade: (F, L) => { L.upgradeOf = F; det.onStroke(L); }, onReject: why => {
       if (!active()) return;
       const nx = $('#bNext'); nx.textContent = REJECT_TXT[why]; nx.classList.add('warn');
       clearTimeout(st.cueT); st.cueT = setTimeout(() => { nx.classList.remove('warn'); nx.textContent = nextLabel(st.bi + 1); }, 2600);
@@ -2369,7 +2537,7 @@
         <div class="row"><span class="k">${ICON.sensor}Akselerometer</span><span class="vs" id="sAcc">–</span></div>
         <div class="row"><span class="k">${ICON.sensor}Orientasi α / β / γ</span><span class="vs num" id="sO">–</span></div>
       </div>
-      <p class="note">Pegang HP kayak raket (atas HP = ujung raket, layar = muka forehand). Forehand atau backhand: bunyi kalau kehitung. Ancang-ancang, balik ke posisi siap, atau cuma muter pergelangan: nggak bunyi. Kalau kalibrasi arah belum kekunci, gerak-gerakin HP pelan ke segala arah beberapa detik.</p>
+      <p class="note">Pegang HP kayak raket (atas HP = ujung raket, layar = muka forehand). Forehand, backhand, atau overhead (bandeja, víbora, smash): bunyi kalau kehitung. Ancang-ancang, raket jatuh di belakang punggung sebelum smash, balik ke posisi siap, atau cuma muter pergelangan: nggak bunyi. Kalau kalibrasi arah belum kekunci, gerak-gerakin HP pelan ke segala arah beberapa detik.</p>
       <div class="card" style="padding:14px 16px">
         <div class="chart-head"><h3>Rekam data mentah</h3><span class="note" id="rawN"></span></div>
         <p class="sub" style="margin-bottom:10px">Kalau deteksinya masih aneh di HP kamu: rekam 15 detik sambil ayun beberapa forehand & backhand, terus kirim file-nya ke yang bikin aplikasi ini buat disetel.</p>
@@ -2385,6 +2553,7 @@
     const RJ = { short: 'kependekan', twist: 'muter pergelangan' };
     const det = new Detector({ getT: thr,
       onStroke: L => { const r = strokeSpeed(L).kmh; Snd.hit(clamp(r / 60, 0, 1)); n++; mx = Math.max(mx, r); $('#sN').textContent = n; gaugeLast(ballOf(r)); },
+      onUpgrade: (F, L) => { const r = strokeSpeed(L).kmh; mx = Math.max(mx, r); gaugeLast(ballOf(r)); },
       onReject: why => { rj++; $('#sRej').textContent = `${rj} · ${RJ[why] || why}`; } });
     const unsub = Motion.sub(s => { det.feed(s); curH = Math.max(curH, s.perp); curW = Math.max(curW, s.w); });
     const loop = () => {
@@ -2440,5 +2609,5 @@
   if (!PREVIEW && 'serviceWorker' in navigator && location.protocol === 'https:') {
     addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => { /* offline cache optional */ }));
   }
-  window.__pala = { Motion, S, go, REPLAYS: () => REPLAYS };
+  window.__pala = { Motion, S, go, REPLAYS: () => REPLAYS, ballFlight, spinInfo, faceMetrics };
 })();
