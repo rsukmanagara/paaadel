@@ -12,7 +12,7 @@
   const PREVIEW = !!window.PALA_PREVIEW; // design preview page: no sensors, simulated swings only
 
   /* ===================== constants ===================== */
-  const VERSION = '1.3';
+  const VERSION = '1.4';
   const LEVER = 0.62;          // m — gyro-only fallback: rotation centre to racket sweet spot (effective)
   const R_HEAD = 0.32;         // m — hand (phone) to the centre of the racket head
   const BALL_RATIO = 1.35;     // padel ball off the sweet spot vs racket-head speed
@@ -92,7 +92,8 @@
     gauge: sv('<path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 18l4-6"/>'),
     download: sv('<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>'),
     upload: sv('<path d="M12 20V9M7 14l5-5 5 5M5 4h14"/>'),
-    moon: sv('<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>')
+    moon: sv('<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>'),
+    user: sv('<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>')
   };
 
   /* ===================== storage ===================== */
@@ -101,16 +102,18 @@
     goal: 20, sound: true, soundKind: 'pop', dynamic: true, vibrate: true,
     coach: true, coachLang: 'id', unit: 'kmh', sens: 'medium', fine: 1, hand: 'R', calib: 1,
     autolock: true, seenHowTo: false, theme: 'auto', axis: null, zone: { on: false, min: 35, max: 48, preset: 'kontrol' },
+    profile: { h: null, w: null, skip: false }, // body height (cm) and weight (kg) for the 3D analysis; skip = "Nanti aja" on home
     look: { racket: 'classic', ribbon: true, ghosts: true, ghostDensity: 'normal', peak: true, dots: true, arrow: false }
   };
   function load(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }
   function store(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } }
   const S = load(KEY, null) || {};
-  const prevLook = (S.settings && S.settings.look) || {}, prevZone = (S.settings && S.settings.zone) || {};
+  const prevLook = (S.settings && S.settings.look) || {}, prevZone = (S.settings && S.settings.zone) || {}, prevProf = (S.settings && S.settings.profile) || {};
   S.settings = Object.assign({}, DEFAULTS, S.settings || {});
   S.settings.look = Object.assign({}, DEFAULTS.look, prevLook);
   if ('ribbonWidth' in prevLook) { S.settings.look.dots = true; delete S.settings.look.ribbonWidth; delete S.settings.look.ribbonColor; } // 1.0 → 1.1 replay look
   S.settings.zone = Object.assign({}, DEFAULTS.zone, prevZone);
+  S.settings.profile = Object.assign({}, DEFAULTS.profile, prevProf);
   S.days = S.days || {};
   S.sessions = S.sessions || [];
   S.strokes = S.strokes || {};
@@ -120,6 +123,10 @@
   S.replaysMade = S.replaysMade || 0;
   let REPLAYS = load(RKEY, []);
   const set = S.settings;
+  // body profile: sane height (cm) / weight (kg) or null. The 3D analysis is laid out for a 175 cm player and scaled.
+  const profH = v => { v = Math.round(+v); return isFinite(v) && v >= 120 && v <= 220 ? v : null; };
+  const profW = v => { v = Math.round(+v); return isFinite(v) && v >= 30 && v <= 200 ? v : null; };
+  const bodyK = () => (set.profile.h || 175) / 175;
   let saveT = null;
   function persist(immediate) {
     clearTimeout(saveT);
@@ -882,6 +889,7 @@
     app.innerHTML = `<section class="scr tabbed">
       <header class="hdr"><div>${LOGO}<p class="tagline">Latihan padel di rumah biar kamu makin jago di lapangan</p></div>
         <button class="round" data-act="settings" aria-label="Pengaturan">${ICON.gear}</button></header>
+      ${!set.profile.h && !set.profile.skip ? `<div class="tip"><span class="ic">${ICON.user}</span><span><b>Kenalan dulu yuk</b>Isi tinggi & berat badanmu biar posisi bola di Analisis 3D pas sama badanmu, nggak pakai ukuran rata-rata.<span style="display:flex;gap:16px"><button class="link" data-act="profile" style="padding:6px 0 0">Isi profil</button><button class="link" data-act="profSkip" style="padding:6px 0 0;color:var(--ink-2)">Nanti aja</button></span></span></div>` : ''}
       <div class="hero">${COURT}
         <div class="top"><span class="lbl">Target hari ini</span>${st.current ? `<span class="streak">${ICON.flame}${st.current} hari beruntun</span>` : ''}</div>
         <div class="big"><b>${t.sw}</b><span>/ ${set.goal} ayunan</span></div>
@@ -906,6 +914,7 @@
     </section>`;
     actions = {
       seed: seedExample, settings: () => go('settings'), howto: () => go('howto', { from: 'home' }),
+      profile: () => go('profile', { from: 'home' }), profSkip: () => { set.profile.skip = true; persist(true); go('home'); },
       backup: exportBackup, snooze: () => { S.backupSnooze = Date.now(); persist(true); go('home'); },
       free: () => startWith(() => go('free'))
     };
@@ -1500,7 +1509,7 @@
   // Overheads are played around the service line.
   const HEAD_Y = 0.29, TIP_Y = 0.425; // racket: hand at 0, head centre and tip along the racket axis (m)
   const POS_Z = { VL: 3.2, BJ: 6.8, VB: 6.5, SM: 5.5 };
-  /* where the ball meets the racket head, per stroke, for a ~1.75 m player: s = sideways from the body's centre line
+  /* where the ball meets the racket head, per stroke, for a 175 cm player (scaled by the profile height): s = sideways from the body's centre line
      (+ = hitting-hand side, − = the other side), f = in front of the body towards the net, y = height above the court
      (all m). byFace: the side follows the face that hit (screen = forehand side, back of the phone = backhand side). */
   const CONTACT = {
@@ -1515,8 +1524,8 @@
   };
   function computeFrames(rep0) {
     const rep = aligned(rep0), over = !!STROKES[rep.stroke].over, hs = rep.hand === 'L' ? -1 : 1, st = rep.stroke;
-    const pz = POS_Z[st] || 7.6, px = 1.3 * hs;
-    const Sh = [px + 0.19 * hs, over ? 1.55 : 1.42, pz], arm = over ? 0.62 : 0.58;
+    const pz = POS_Z[st] || 7.6, px = 1.3 * hs, bk = bodyK(); // bk: player height / 175 cm
+    const Sh = [px + 0.19 * hs * bk, (over ? 1.55 : 1.42) * bk, pz], arm = (over ? 0.62 : 0.58) * bk;
     const bias = over ? [0, 0.3, -0.2] : [0, -0.8, -0.3];
     const model = q => { const d = Q.rot(q, [0, 1, 0]); const a = [d[0] + bias[0], d[1] + bias[1], d[2] + bias[2]]; const L = Math.hypot(a[0], a[1], a[2]) || 1; return [Sh[0] + arm * a[0] / L, Math.max(0.32, Sh[1] + arm * a[1] / L), Sh[2] + arm * a[2] / L]; };
     let Hs;
@@ -1528,7 +1537,7 @@
     } else Hs = rep.q.map(model);
     // move the whole path so the racket head is at this stroke's contact point at the moment of contact
     const cp = CONTACT[st] || CONTACT.FH, side = cp.byFace ? (rep.face || 1) : 1;
-    const Ct = [px + hs * side * cp.s, cp.y, pz - cp.f];
+    const Ct = [px + hs * side * cp.s * bk, cp.y * bk, pz - cp.f * bk];
     const ca = contactAt(rep), q0 = rep.q[ca.i], q1 = rep.q[ca.i + 1] || q0;
     const head = (h, q) => V3.add(h, Q.rot(q, [0, HEAD_Y, 0]), 1);
     const Cc = V3.add(V3.scale(head(Hs[ca.i], q0), 1 - ca.f), head(Hs[ca.i + 1] || Hs[ca.i], q1), ca.f);
@@ -1549,7 +1558,7 @@
      the ball bounces (turf: 74% of the drop speed back; friction with the spin — a slice skids low, topspin kicks on, a
      víbora's sidespin kicks sideways) and is followed to the glass. */
   function ballFlight(rep) {
-    const key = rep.id + '|' + rep.k + '|' + rep.t.length; if (flightCache.has(key)) return flightCache.get(key);
+    const key = rep.id + '|' + rep.k + '|' + rep.t.length + '|' + bodyK(); if (flightCache.has(key)) return flightCache.get(key);
     const R = aligned(rep), F = computeFrames(rep), ca = contactAt(rep), F0 = F[ca.i], F1 = F[ca.i + 1] || F0;
     const n = Q.rot(Q.slerp(F0.q, F1.q, ca.f), [0, 0, rep.face || 1]), Cc = V3.add(V3.scale(F0.C, 1 - ca.f), F1.C, ca.f);
     const Ln = launchBall(V3.scale(R.vc, rep.k || 1), n), spin0 = Ln.w.slice();
@@ -2375,6 +2384,7 @@
       else if (typeof dv === 'number' && typeof v === 'number' && isFinite(v)) settings[k] = k === 'goal' ? clamp(Math.round(v), 10, 1000) : k === 'fine' ? clamp(v, 0.7, 1.5) : k === 'calib' ? clamp(v, 0.8, 1.3) : v;
     });
     if (bs.look && typeof bs.look === 'object') settings.look = Object.fromEntries(Object.keys(DEFAULTS.look).filter(k => typeof bs.look[k] === typeof DEFAULTS.look[k]).map(k => [k, typeof bs.look[k] === 'string' ? str(bs.look[k], 12) : bs.look[k]]));
+    if (bs.profile && typeof bs.profile === 'object') settings.profile = { h: profH(bs.profile.h), w: profW(bs.profile.w), skip: !!bs.profile.skip };
     if (bs.zone && typeof bs.zone === 'object') settings.zone = { on: !!bs.zone.on, min: clamp(num(bs.zone.min) || 35, 10, 200), max: clamp(num(bs.zone.max) || 48, 12, 200), preset: str(bs.zone.preset, 10) };
     const best = { racket: Math.max(0, num(d.best && d.best.racket)), date: d.best && isDay(d.best.date) ? d.best.date : null };
     const keys = Object.keys(days).sort();
@@ -2392,7 +2402,7 @@
     if (mode === 'replace') {
       S.days = c.days; S.sessions = c.sessions; S.strokes = c.strokes; S.workouts = c.workouts; S.best = c.best;
       S.workoutsDone = c.workoutsDone; S.replaysMade = c.replaysMade; if (c.firstDay) S.firstDay = c.firstDay; else delete S.firstDay;
-      Object.entries(c.settings).forEach(([k, v]) => { if (k === 'look' || k === 'zone') Object.assign(set[k], v); else set[k] = v; });
+      Object.entries(c.settings).forEach(([k, v]) => { if (k === 'look' || k === 'zone' || k === 'profile') Object.assign(set[k], v); else set[k] = v; });
       REPLAYS = trimReplays(c.replays.slice());
     } else {
       for (const [k, v] of Object.entries(c.days)) { const cur = S.days[k]; S.days[k] = cur ? { sw: Math.max(cur.sw, v.sw), best: Math.max(cur.best, v.best), sec: Math.max(cur.sec, v.sec), sess: Math.max(cur.sess, v.sess) } : v; }
@@ -2438,6 +2448,35 @@
   }
   const needsBackupNudge = () => !PREVIEW && totalSwings() >= 100 && (!S.lastBackup || Date.now() - S.lastBackup > 14 * 864e5) && (!S.backupSnooze || Date.now() - S.backupSnooze > 14 * 864e5);
 
+  /* ---------- profile (body size for the 3D analysis) ---------- */
+  SCREENS.profile = function (p = {}) {
+    const pr = set.profile;
+    const num = (id, val, ph, unit, label) => `<label class="field"><span class="label">${label}</span><span style="display:flex;align-items:center;gap:10px"><input id="${id}" type="number" inputmode="numeric" placeholder="${ph}" value="${val ?? ''}" autocomplete="off"><span class="sub" style="min-width:24px">${unit}</span></span></label>`;
+    app.innerHTML = `<section class="scr">
+      ${subhdr('Profil kamu')}
+      <p class="sub">Biar Analisis 3D ngikutin badanmu, bukan ukuran rata-rata. Makin tinggi kamu, makin tinggi titik kena bola dan makin jauh jangkauan tanganmu.</p>
+      ${num('pH', pr.h, '175', 'cm', 'Tinggi badan')}
+      ${num('pW', pr.w, '70', 'kg', 'Berat badan (opsional)')}
+      <span class="label">Tangan dominan</span>
+      <div class="seg"><button data-act="hand" data-k="R" aria-pressed="${set.hand === 'R'}">Kanan</button><button data-act="hand" data-k="L" aria-pressed="${set.hand === 'L'}">Kiri</button></div>
+      <p class="note">Tinggi badan dan tangan dominan ngatur posisi bola di Analisis 3D, replay lama juga ikut disesuaiin. Berat badan belum ngubah posisi bola, disimpen buat fitur berikutnya. Semua cuma disimpen di HP ini.</p>
+      <div class="grow"></div>
+      <button class="btn go" data-act="save">Simpan</button>
+    </section>`;
+    const back = () => go(p.from === 'settings' ? 'settings' : 'home');
+    actions = {
+      back,
+      hand: b => { set.hand = b.dataset.k; persist(); app.querySelectorAll('[data-act="hand"]').forEach(x => x.setAttribute('aria-pressed', x.dataset.k === set.hand)); },
+      save: () => {
+        const hv = $('#pH').value.trim(), wv = $('#pW').value.trim(), h = profH(hv), w = wv ? profW(wv) : null;
+        if (!h) { toast('Isi tinggi badan dulu ya (120–220 cm)'); $('#pH').focus(); return; }
+        if (wv && !w) { toast('Berat badannya kayaknya salah ketik (30–200 kg)'); $('#pW').focus(); return; }
+        set.profile.h = h; set.profile.w = w; persist(true);
+        toast('Profil disimpen'); back();
+      }
+    };
+  };
+
   /* ---------- settings ---------- */
   SCREENS.settings = function () {
     const soundNames = { pop: 'Pok padel', crisp: 'Klik nyaring', whip: 'Lecutan', random: 'Acak' };
@@ -2463,6 +2502,12 @@
         <div class="row"><span class="k">Bahasa coach</span>${seg('lang', set.coachLang, [['id', 'Indonesia'], ['en', 'English']], 180)}</div>
         <button class="row" data-act="testVoice"><span class="k">Tes suara coach</span><span class="vs">${ICON.play}</span></button>
       </div>
+
+      <span class="label section">Profil</span>
+      <div class="list">
+        <button class="row" data-act="profile"><span class="k">${ICON.user}Tinggi & berat badan</span><span class="vs">${set.profile.h ? `${set.profile.h} cm${set.profile.w ? ` · ${set.profile.w} kg` : ''}` : 'Belum diisi'} ${ICON.chev}</span></button>
+      </div>
+      <p class="note">Tinggi badan dipakai buat nentuin posisi bola dan jangkauan tangan di Analisis 3D.</p>
 
       <span class="label section">Ayunan</span>
       <div class="list">
@@ -2508,7 +2553,7 @@
       sens: () => sensSheet(() => { $('#sensV').innerHTML = SENS[set.sens].label + ' ' + ICON.chev; }),
       lang: segAct('coachLang', () => Coach.pick()),
       testVoice: () => { Coach.pick(); Coach.say('Forehand, sepuluh kali. Gas!', 'Forehand, ten reps. Go!', true); },
-      hand: segAct('hand'), unit: segAct('unit'), theme: segAct('theme', applyTheme),
+      hand: segAct('hand'), unit: segAct('unit'), theme: segAct('theme', applyTheme), profile: () => go('profile', { from: 'settings' }),
       howto: () => go('howto', { from: 'settings' }), howspeed: helpSpeed,
       backup: exportBackup, restore: restoreSheet,
       sensor: () => startWith(() => go('sensor')),

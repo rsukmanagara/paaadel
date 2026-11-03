@@ -13,6 +13,7 @@ Web app (PWA) buat latihan shadow swing padel pakai sensor gerak HP. Pegang HP k
 - **Program** — 7 drill padel siap pakai + bikin program sendiri. Suara coach bahasa Indonesia atau Inggris.
 - **Progres** — total ayunan, hari beruntun, tren kecepatan, ayunan per hari/minggu/bulan, kalender 17 minggu, komposisi pukulan.
 - **Backup & pulihkan** — simpan semua progres (statistik, rekor, program buatan, replay) ke satu file .json lewat Share → Save to Files/Drive, atau salin sebagai kode. Pulihkan dengan mode *Gabungin* (tanpa dobel hitung) atau *Timpa*. Ada pengingat backup setelah 100+ ayunan.
+- **Profil** — tinggi badan, berat badan (opsional), dan tangan dominan. Ditanya di beranda; tinggi badan bikin posisi bola & jangkauan tangan di Analisis 3D pas sama badanmu.
 - **Kunci layar** otomatis pas ngayun, tema terang/gelap, satuan km/h atau mph.
 
 ## Pakai di iPhone
@@ -30,7 +31,7 @@ Web app (PWA) buat latihan shadow swing padel pakai sensor gerak HP. Pegang HP k
 - Urutan sumbu giroskop dan tanda akselerometer beda antara iPhone dan Android, jadi PAAADEL mengkalibrasi sendiri (giroskop vs sensor orientasi, akselerometer vs gravitasi). Cek di Pengaturan → Tes sensor; di situ juga bisa **rekam data mentah 15 detik** buat dikirim kalau deteksinya masih aneh.
 
 ## Arah bola (Analisis 3D)
-**Titik kena beda tiap pukulan.** Sensor HP cuma tahu bentuk ayunan, bukan posisi badanmu di lapangan, jadi bola ditaruh di titik kena yang umum buat tiap pukulan (pemain ±1,75 m), lalu ayunan yang terekam digeser ke situ:
+**Titik kena beda tiap pukulan.** Sensor HP cuma tahu bentuk ayunan, bukan posisi badanmu di lapangan, jadi bola ditaruh di titik kena yang umum buat tiap pukulan, lalu ayunan yang terekam digeser ke situ. Angka di bawah buat pemain 175 cm; semuanya (tinggi, jangkauan, bahu) ikut diskalakan sama **tinggi badan di Profil** (misal 184 cm → bandeja ±1,9 m, smash ±2,5 m):
 
 | Pukulan | Tinggi bola | Posisi |
 |---|---|---|
