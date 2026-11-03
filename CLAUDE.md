@@ -7,7 +7,7 @@ Tagline: **"Latihan padel di rumah biar kamu makin jago di lapangan."**
 README.md berisi penjelasan lengkap fitur, cara deteksi ayunan, model kecepatan, dan arah bola. Baca itu dulu sebelum mengubah logika deteksi atau fisika bola, dan perbarui README kalau perilakunya berubah.
 
 ## Status
-- Versi `1.2` (konstanta `VERSION` di app.js). Tahap uji coba pribadi, dipakai pemilik sendiri untuk latihan.
+- Versi `1.3` (konstanta `VERSION` di app.js). Tahap uji coba pribadi, dipakai pemilik sendiri untuk latihan.
 - Hosting: GitHub Pages dari repo publik `rsukmanagara/paaadel` (branch default, root folder). Ada `.nojekyll`.
 - Belum diputuskan: nanti dijadikan aplikasi yang bisa diunduh (store), atau cukup dibagikan lewat link (PWA).
 
@@ -30,6 +30,7 @@ README.md berisi penjelasan lengkap fitur, cara deteksi ayunan, model kecepatan,
 - Berdasarkan rotasi yang menggerakkan kepala raket (`|ω × y|`), bukan putaran pergelangan di sumbu panjang HP. Layar = muka forehand, belakang HP = muka backhand.
 - Sensitivitas Santai/Sedang/Kenceng: ambang kecepatan dan sapuan minimum `MIN_SWEEP` 18/28/38°. Ayunan yang kebanyakan muter pergelangan (twist) ditolak.
 - Ancang-ancang, balik ke posisi siap, dan raket jatuh di belakang punggung sebelum smash tidak dihitung. Overhead (bandeja, víbora, smash) punya aturan sendiri.
+- Posisi bola di analisis 3D: titik kena per pukulan (`CONTACT` di app.js, tabel di README), jalur ayunan digeser ke titik itu.
 - Kecepatan kepala raket = kecepatan tangan (akselerometer, diintegrasikan) + lecutan (giroskop × `R_HEAD` 0,32 m). Tanpa akselerometer: giroskop × `LEVER` 0,62 m. Bola ≈ raket × `BALL_RATIO` 1,35.
 - Sumbu giroskop/akselerometer beda antara iPhone dan Android; app mengkalibrasi sendiri. Debug: Pengaturan → Tes sensor (bisa rekam data mentah 15 detik), dan `window.__detLog` mencatat event deteksi.
 

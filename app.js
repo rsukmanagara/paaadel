@@ -12,7 +12,7 @@
   const PREVIEW = !!window.PALA_PREVIEW; // design preview page: no sensors, simulated swings only
 
   /* ===================== constants ===================== */
-  const VERSION = '1.2';
+  const VERSION = '1.3';
   const LEVER = 0.62;          // m — gyro-only fallback: rotation centre to racket sweet spot (effective)
   const R_HEAD = 0.32;         // m — hand (phone) to the centre of the racket head
   const BALL_RATIO = 1.35;     // padel ball off the sweet spot vs racket-head speed
@@ -1494,11 +1494,25 @@
     }
     alignCache.set(key, out); return out;
   }
-  // racket pose is measured (orientation). Hand position: measured path (accelerometer) anchored at a modelled contact
-  // point, or — without one — modelled as a hand on an arm from the shoulder. Overheads are played around the service
-  // line with the contact point above the head.
+  // racket pose is measured (orientation). Hand position: measured path (accelerometer), or — without one — modelled as
+  // a hand on an arm from the shoulder. Either way the whole path is then moved so the racket head meets the ball at
+  // that stroke's contact point (CONTACT): the sensors give the swing's shape, not where the body is on court.
+  // Overheads are played around the service line.
   const HEAD_Y = 0.29, TIP_Y = 0.425; // racket: hand at 0, head centre and tip along the racket axis (m)
   const POS_Z = { VL: 3.2, BJ: 6.8, VB: 6.5, SM: 5.5 };
+  /* where the ball meets the racket head, per stroke, for a ~1.75 m player: s = sideways from the body's centre line
+     (+ = hitting-hand side, − = the other side), f = in front of the body towards the net, y = height above the court
+     (all m). byFace: the side follows the face that hit (screen = forehand side, back of the phone = backhand side). */
+  const CONTACT = {
+    FH: { s: 0.75, f: 0.35, y: 0.95 },             // waist height, beside the body on the forehand side
+    BH: { s: -0.65, f: 0.4, y: 0.9 },              // waist height, on the other side
+    VL: { s: 0.45, f: 0.55, y: 1.25, byFace: 1 },  // chest height, well in front
+    LB: { s: 0.6, f: 0.3, y: 0.55, byFace: 1 },    // low, under the ball (knee to thigh)
+    SV: { s: 0.55, f: 0.35, y: 0.7 },              // underhand, below the waist (the rule)
+    BJ: { s: 0.45, f: 0.35, y: 1.8 },              // head height, a little in front and to the side
+    VB: { s: 0.55, f: 0.3, y: 1.95 },              // a bit above the head, more to the side
+    SM: { s: 0.25, f: 0.35, y: 2.35 }              // highest: arm stretched up
+  };
   function computeFrames(rep0) {
     const rep = aligned(rep0), over = !!STROKES[rep.stroke].over, hs = rep.hand === 'L' ? -1 : 1, st = rep.stroke;
     const pz = POS_Z[st] || 7.6, px = 1.3 * hs;
@@ -1511,9 +1525,17 @@
       let m = 0; rep.p.forEach(x => { m = Math.max(m, Math.hypot(x[0], x[1], x[2])); });
       const k = m > 2.2 ? 2.2 / m : 1; // keep a drifting path inside arm's reach of the body
       Hs = rep.p.map(x => [A[0] + x[0] * k, A[1] + x[1] * k, A[2] + x[2] * k]);
-      let lo = Infinity; Hs.forEach(h => { lo = Math.min(lo, h[1]); });
-      if (lo < 0.2) Hs.forEach(h => { h[1] += 0.2 - lo; });
     } else Hs = rep.q.map(model);
+    // move the whole path so the racket head is at this stroke's contact point at the moment of contact
+    const cp = CONTACT[st] || CONTACT.FH, side = cp.byFace ? (rep.face || 1) : 1;
+    const Ct = [px + hs * side * cp.s, cp.y, pz - cp.f];
+    const ca = contactAt(rep), q0 = rep.q[ca.i], q1 = rep.q[ca.i + 1] || q0;
+    const head = (h, q) => V3.add(h, Q.rot(q, [0, HEAD_Y, 0]), 1);
+    const Cc = V3.add(V3.scale(head(Hs[ca.i], q0), 1 - ca.f), head(Hs[ca.i + 1] || Hs[ca.i], q1), ca.f);
+    const off = V3.add(Ct, Cc, -1);
+    Hs = Hs.map(h => V3.add(h, off, 1));
+    // keep the hand off the floor and the racket tip above it (a lob's backswing can reach down low)
+    Hs.forEach((h, i) => { const dy = Q.rot(rep.q[i], [0, 1, 0])[1]; h[1] = Math.max(h[1], 0.22, 0.04 - TIP_Y * dy); });
     const ser = repSeries(rep);
     return rep.q.map((q, i) => {
       const H = Hs[i];

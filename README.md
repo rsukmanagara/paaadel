@@ -30,6 +30,21 @@ Web app (PWA) buat latihan shadow swing padel pakai sensor gerak HP. Pegang HP k
 - Urutan sumbu giroskop dan tanda akselerometer beda antara iPhone dan Android, jadi PAAADEL mengkalibrasi sendiri (giroskop vs sensor orientasi, akselerometer vs gravitasi). Cek di Pengaturan → Tes sensor; di situ juga bisa **rekam data mentah 15 detik** buat dikirim kalau deteksinya masih aneh.
 
 ## Arah bola (Analisis 3D)
+**Titik kena beda tiap pukulan.** Sensor HP cuma tahu bentuk ayunan, bukan posisi badanmu di lapangan, jadi bola ditaruh di titik kena yang umum buat tiap pukulan (pemain ±1,75 m), lalu ayunan yang terekam digeser ke situ:
+
+| Pukulan | Tinggi bola | Posisi |
+|---|---|---|
+| Lob | ±0,55 m (lutut–paha) | samping, ikut sisi muka raket yang mukul |
+| Servis | ±0,7 m (di bawah pinggang) | samping forehand |
+| Backhand | ±0,9 m (pinggang) | sisi backhand |
+| Forehand | ±0,95 m (pinggang) | sisi forehand |
+| Voli | ±1,25 m (dada) | jauh di depan badan, ikut sisi muka raket |
+| Bandeja | ±1,8 m (sejajar kepala) | sedikit di depan & samping |
+| Víbora | ±1,95 m (sedikit di atas kepala) | lebih ke samping |
+| Smash | ±2,35 m (tangan lurus ke atas) | hampir di atas kepala |
+
+Arah raket, sudut muka, dan jalur tangan tetap dari sensor.
+
 Pas kena, kecepatan kepala raket dibagi dua: bagian yang **ngedorong lurus muka raket** (bola ≈ 1,35× bagian itu) dan bagian yang **motong menyamping di muka raket** (slice bandeja, potongan samping víbora, low-to-high topspin). Bagian yang motong nambah sedikit laju ke arah itu dan bikin bola **berputar** (permukaan bola ≈ 0,6× kecepatan potongan). Lintasannya dihitung pakai gravitasi, hambatan udara, dan **efek Magnus**: backspin bikin bola melayang, topspin bikin cepat turun, spin samping bikin melengkung. Buat overhead, tenaga bola lob yang datang ikut dihitung. Kalau masuk, bola mantul (74% kecepatan jatuhnya, gesekan sama spin: slice mantul rendah, víbora nendang ke samping) terus diikutin sampai kaca. Hasilnya: masuk, nyangkut net, kepanjangan, atau melebar, plus spin dan tinggi pantulan. Titik kena diambil di antara dua data sensor (bukan cuma data terdekat) biar sudut muka raketnya stabil. Lapangan diputar supaya bola keluar ke arah net. Kamera bisa Auto, Belakang (kayak dilihat dari belakang pemain), Samping (buat lihat sudut muka raket), atau Lapangan.
 
 ## Kecepatan
