@@ -7,7 +7,7 @@ Tagline: **"Latihan padel di rumah biar kamu makin jago di lapangan."**
 README.md berisi penjelasan lengkap fitur, cara deteksi ayunan, model kecepatan, dan arah bola. Baca itu dulu sebelum mengubah logika deteksi atau fisika bola, dan perbarui README kalau perilakunya berubah.
 
 ## Status
-- Versi `1.4` (konstanta `VERSION` di app.js). Tahap uji coba pribadi, dipakai pemilik sendiri untuk latihan.
+- Versi `1.5` (konstanta `VERSION` di app.js). Tahap uji coba pribadi, dipakai pemilik sendiri untuk latihan.
 - Hosting: GitHub Pages dari repo publik `rsukmanagara/paaadel` (branch default, root folder). Ada `.nojekyll`.
 - Belum diputuskan: nanti dijadikan aplikasi yang bisa diunduh (store), atau cukup dibagikan lewat link (PWA).
 
@@ -15,13 +15,15 @@ README.md berisi penjelasan lengkap fitur, cara deteksi ayunan, model kecepatan,
 - Mayoritas anak muda. Semua teks UI dan suara coach pakai bahasa Indonesia santai, tidak kaku (contoh gaya: "Gas latihan bebas", "Kenceng", "nggak dihitung"). Suara coach juga punya opsi bahasa Inggris.
 - Terinspirasi ShadowSwing, tapi tampilan harus jelas berbeda: sporty, warna netral gender (aksen hijau toska `#0B6B60`), tema terang/gelap.
 - Font self-hosted: Inter + Plus Jakarta Sans (folder `fonts/`).
+- Arah desain (unslop, v1.5): chrome abu netral (bukan latar kehijauan), garis tipis 9%. **Teal = aksi & pilihan aktif** (tombol, toggle, tab aktif), **oranye cuma buat angka kecepatan bola & rekor**. Warna rame cuma di "momen": speedometer, kartu target di beranda (lapangan, isinya tombol Gas latihan bebas), replay 3D. Ciri khas: **titik bola kuning** (`--ball`) nandain pukulan terakhir (speedometer, riwayat ayunan, titik kena di replay).
+- Aturan gaya: grid 4px; radius kontrol 8–12, kartu 16, sheet 20 (bukan pil semua); Inter 500/600 buat angka & judul (logo tetap 900), Plus Jakarta Sans 400/500/600; tanpa huruf kapital ber-tracking; tanpa tanda seru di teks UI (suara coach boleh); label/caption pendek tanpa titik; ikon ikut warna teks (bukan kotak berwarna); status = titik kecil + teks; satu easing `--ease`.
 
 ## Struktur & teknologi
 - HTML/CSS/JS murni, tanpa build step, tanpa framework, tanpa server, tanpa akun.
 - `index.html` — kerangka kosong; seluruh UI dirender oleh `app.js` ke `#app`.
 - `app.js` (~2.600 baris, satu IIFE) — semua logika. Dibagi per bagian dengan komentar `/* ===== nama ===== */`: constants, storage, audio, coach voice, wake lock, motion sensors, swing detection, racket-head speed, screen lock, routing, screens (home, free hitting, how to hold, shot analysis, replay 3D, workouts, progress, backup & restore, settings, sensor test), swing geometry & ball flight, 3D replay engine, boot.
 - `style.css` — semua gaya. `vendor/three.min.js` (three.js r149) dimuat saat replay 3D dibuka.
-- `sw.js` — service worker offline. App shell *network-first*; `vendor/`, `icons/`, `fonts/` *cache-first*. Naikkan `CACHE` (sekarang `paaadel-v5`) kalau mengganti file di folder-folder itu.
+- `sw.js` — service worker offline. App shell *network-first*; `vendor/`, `icons/`, `fonts/` *cache-first*. Naikkan `CACHE` (sekarang `paaadel-v6`) kalau mengganti file di folder-folder itu.
 - `manifest.webmanifest` — PWA (standalone, portrait).
 - Data hanya di `localStorage` HP: kunci `paaadel.v1` (pengaturan, statistik, rekor, program) dan `paaadel.replays.v1` (replay). Jaga kompatibilitas data lama: setiap pengaturan baru harus punya default di `DEFAULTS` dan data lama dimigrasi saat load, bukan dihapus.
 - `window.PALA_PREVIEW` = mode pratinjau desain (tanpa sensor, ayunan simulasi).
