@@ -12,7 +12,7 @@
   const PREVIEW = !!window.PALA_PREVIEW; // design preview page: no sensors, simulated swings only
 
   /* ===================== constants ===================== */
-  const VERSION = '1.4';
+  const VERSION = '1.5';
   const LEVER = 0.62;          // m — gyro-only fallback: rotation centre to racket sweet spot (effective)
   const R_HEAD = 0.32;         // m — hand (phone) to the centre of the racket head
   const BALL_RATIO = 1.35;     // padel ball off the sweet spot vs racket-head speed
@@ -762,7 +762,7 @@
     function engage() {
       if (el || !set.autolock || Motion.isSim()) return; // simulated swings come from a button, so no palm to guard against
       el = document.createElement('div'); el.id = 'guard';
-      el.innerHTML = `<div class="guard-pill" role="button" tabindex="0" aria-label="Tahan buat buka kunci layar"><span class="lk"><svg class="pr" viewBox="0 0 36 36"><circle cx="18" cy="18" r="15.9" fill="none" stroke="rgba(255,255,255,.25)" stroke-width="2.4"/><circle class="p" cx="18" cy="18" r="15.9" fill="none" stroke="#FF6A2B" stroke-width="2.4" pathLength="100"/></svg>${ICON.lock}</span><span>Layar dikunci · tahan buat buka</span></div>`;
+      el.innerHTML = `<div class="guard-pill" role="button" tabindex="0" aria-label="Tahan buat buka kunci layar"><span class="lk"><svg class="pr" viewBox="0 0 36 36"><circle cx="18" cy="18" r="15.9" fill="none" stroke="currentColor" stroke-opacity=".25" stroke-width="2"/><circle class="p" cx="18" cy="18" r="15.9" fill="none" style="stroke:var(--teal)" stroke-width="2.4" pathLength="100"/></svg>${ICON.lock}</span><span>Kekunci · tahan buat buka</span></div>`;
       document.body.appendChild(el);
       const pill = el.querySelector('.guard-pill');
       const stopHold = () => { clearTimeout(holdT); pill.classList.remove('hold'); };
@@ -850,7 +850,7 @@
       after && after();
     };
     const ov = openOv(`<div class="shdr"><h2 class="title">Sensitivitas</h2><button class="link" data-act="close">Oke</button></div>
-      <p class="sub">Atur seberapa kenceng ayunan yang dihitung jadi 1 rep.</p>
+      <p class="sub">Atur seberapa kenceng ayunan yang dihitung jadi 1 rep</p>
       <div class="seg" role="group" aria-label="Level sensitivitas">${Object.entries(SENS).map(([k, v]) => `<button data-act="lvl" data-k="${k}" aria-pressed="${set.sens === k}">${v.label}</button>`).join('')}</div>
       <div class="sens-sheet"><input type="range" id="fine" min="0.7" max="1.5" step="0.05" value="${set.fine}" aria-label="Setel halus"><div class="fine"><span>Lebih gampang</span><span id="fineLbl"></span><span>Lebih susah</span></div></div>
       <p class="note">Forehand dan backhand dua-duanya dihitung, asal cukup panjang dan kencang. Ancang-ancang, balik ke posisi siap, dan muter pergelangan nggak dihitung. Santai cocok buat pemanasan; Kenceng buat yang mau nge-push power.</p>`, {
@@ -868,9 +868,9 @@
     const [x0, y0] = gpt(0), [x1, y1] = gpt(1);
     const d = `M${x0.toFixed(1)} ${y0.toFixed(1)} A${GR} ${GR} 0 1 1 ${x1.toFixed(1)} ${y1.toFixed(1)}`;
     const lbl = f => { const [x, y] = gpt(f, GR + 25); return `<text class="g-lbl" x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="middle" dominant-baseline="middle">${Math.round(conv(GMAX * f))}</text>`; };
-    return `<svg class="gauge" viewBox="0 0 300 236" aria-hidden="true"><defs><linearGradient id="gg" x1="0" y1="0" x2="1" y2="0"><stop offset="0" style="stop-color:var(--teal)"/><stop offset="1" style="stop-color:var(--orange)"/></linearGradient></defs>
-      <path class="g-track" d="${d}" pathLength="100"/><path class="g-zone" id="gZone" d=""/><path class="g-live" id="gLive" d="${d}" pathLength="100" stroke="url(#gg)" stroke-dasharray="0 100"/>
-      <line class="g-th" id="gTh"/><circle class="g-last" id="gLast" r="10" visibility="hidden"/>${lbl(0)}${lbl(0.5)}${lbl(1)}</svg>`;
+    return `<svg class="gauge" viewBox="0 0 300 236" aria-hidden="true">
+      <path class="g-track" d="${d}" pathLength="100"/><path class="g-zone" id="gZone" d=""/><path class="g-live" id="gLive" d="${d}" pathLength="100" stroke-dasharray="0 100"/>
+      <line class="g-th" id="gTh"/><circle class="g-last" id="gLast" r="8" visibility="hidden"/>${lbl(0)}${lbl(0.5)}${lbl(1)}</svg>`;
   }
   function gaugeTh() {
     const f = ballOf(racketKmh(thr())) / GMAX, [a, b] = [gpt(f, GR - 17), gpt(f, GR + 17)], l = $('#gTh');
@@ -885,29 +885,29 @@
   SCREENS.home = function () {
     const t = peekDay(dayKey()), pct = clamp(t.sw / set.goal, 0, 1), best = S.best.racket, st = streaks();
     const left = set.goal - t.sw;
-    const msg = t.sw === 0 ? 'Yuk, ayunan pertama hari ini!' : left > 0 ? `Kurang ${left} lagi, gas!` : 'Target kelar. Mantap!';
+    const msg = t.sw === 0 ? 'Yuk, ayunan pertama hari ini' : left > 0 ? `Kurang ${left} lagi, gas` : 'Target kelar, mantap';
     app.innerHTML = `<section class="scr tabbed">
       <header class="hdr"><div>${LOGO}<p class="tagline">Latihan padel di rumah biar kamu makin jago di lapangan</p></div>
         <button class="round" data-act="settings" aria-label="Pengaturan">${ICON.gear}</button></header>
-      ${!set.profile.h && !set.profile.skip ? `<div class="tip"><span class="ic">${ICON.user}</span><span><b>Kenalan dulu yuk</b>Isi tinggi & berat badanmu biar posisi bola di Analisis 3D pas sama badanmu, nggak pakai ukuran rata-rata.<span style="display:flex;gap:16px"><button class="link" data-act="profile" style="padding:6px 0 0">Isi profil</button><button class="link" data-act="profSkip" style="padding:6px 0 0;color:var(--ink-2)">Nanti aja</button></span></span></div>` : ''}
+      ${!set.profile.h && !set.profile.skip ? `<div class="tip"><span class="ic">${ICON.user}</span><span><b>Kenalan dulu yuk</b>Isi tinggi & berat badanmu biar posisi bola di Analisis 3D pas sama badanmu, nggak pakai ukuran rata-rata.<span style="display:flex;gap:16px"><button class="link" data-act="profile" style="padding:8px 0 0">Isi profil</button><button class="link" data-act="profSkip" style="padding:8px 0 0;color:var(--ink-2)">Nanti aja</button></span></span></div>` : ''}
       <div class="hero">${COURT}
         <div class="top"><span class="lbl">Target hari ini</span>${st.current ? `<span class="streak">${ICON.flame}${st.current} hari beruntun</span>` : ''}</div>
         <div class="big"><b>${t.sw}</b><span>/ ${set.goal} ayunan</span></div>
         <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="${set.goal}" aria-valuenow="${t.sw}"><i style="width:${(pct * 100).toFixed(1)}%"></i></div>
-        <div class="foot"><span>${msg}</span><span>${Math.round(pct * 100)}%</span></div>
+        <div class="foot"><span>${msg}</span><span class="num">${Math.round(pct * 100)}%</span></div>
+        <button class="hero-go" data-act="free">${ICON.swing}<span>Gas latihan bebas</span>${ICON.chev}</button>
       </div>
-      <button class="cta" data-act="free"><span class="ic">${ICON.swing}</span><span><b>Gas latihan bebas</b><span>Tiap lecutan yang bunyi = 1 rep</span></span>${ICON.chev}</button>
-      <div class="tiles">
-        <button class="tile" data-tab="analysis"><span class="ic">${ICON.cube}</span><b>Analisis 3D</b><span>Rekam 1 pukulan, cek ayunanmu dari segala sudut</span></button>
-        <button class="tile" data-tab="workouts"><span class="ic">${ICON.clip}</span><b>Program</b><span>Drill padel dipandu suara coach</span></button>
+      <div class="list nav-list">
+        <button class="row" data-tab="analysis"><span class="k">${ICON.cube}<span class="t"><b>Analisis 3D</b><span>Rekam 1 pukulan, cek ayunanmu dari segala sudut</span></span></span><span class="vs">${ICON.chev}</span></button>
+        <button class="row" data-tab="workouts"><span class="k">${ICON.clip}<span class="t"><b>Program</b><span>Drill padel dipandu suara coach</span></span></span><span class="vs">${ICON.chev}</span></button>
       </div>
       <div class="card">
         <div class="chart-head"><h3>Rekor kamu</h3><button class="link" data-tab="stats" style="padding:0">Lihat progres</button></div>
         ${best ? `<div class="record"><div class="v">≈${fv(ballOf(best))}<small>${U()} bola</small></div><div class="side">Raket <b class="num">${fv(best)}</b> ${U()}${S.best.date ? `<br>${fmtDate(keyDate(S.best.date))}` : ''}</div></div>`
         : '<p class="sub">Belum ada rekor. Ayunan pertamamu bakal jadi patokan.</p>'}
       </div>
-      ${needsBackupNudge() ? `<div class="tip"><span class="ic">${ICON.download}</span><span><b>Udah ${totalSwings()} ayunan, backup dulu yuk</b>Biar progresmu aman kalau ganti HP atau data browser kehapus.<span style="display:flex;gap:16px"><button class="link" data-act="backup" style="padding:6px 0 0">Backup sekarang</button><button class="link" data-act="snooze" style="padding:6px 0 0;color:var(--ink-2)">Nanti aja</button></span></span></div>` : ''}
-      ${!S.firstDay && !PREVIEW ? `<div class="tip"><span class="ic">${ICON.hand}</span><span><b>Baru pertama?</b>Pegang HP kayak gagang raket: atas HP = ujung raket, layar = muka forehand. Terus gas latihan bebas. <button class="link" data-act="howto" style="padding:4px 0 0">Lihat cara pegang</button></span></div>` : ''}
+      ${needsBackupNudge() ? `<div class="tip"><span class="ic">${ICON.download}</span><span><b>Udah ${totalSwings()} ayunan, backup dulu yuk</b>Biar progresmu aman kalau ganti HP atau data browser kehapus.<span style="display:flex;gap:16px"><button class="link" data-act="backup" style="padding:8px 0 0">Backup sekarang</button><button class="link" data-act="snooze" style="padding:8px 0 0;color:var(--ink-2)">Nanti aja</button></span></span></div>` : ''}
+      ${!S.firstDay && !PREVIEW ? `<div class="tip"><span class="ic">${ICON.hand}</span><span><b>Baru pertama?</b>Pegang HP kayak gagang raket: atas HP = ujung raket, layar = muka forehand. Tiap lecutan yang bunyi = 1 rep. <button class="link" data-act="howto" style="padding:4px 0 0">Lihat cara pegang</button></span></div>` : ''}
       ${PREVIEW ? `<div class="banner"><b>Ini pratinjau desain.</b> Halaman ini nggak bisa baca sensor gerak, jadi ayunan pakai tombol Simulasi ayunan. Versi https di HP pakai giroskop beneran.${S.firstDay ? '' : ' <button class="link" data-act="seed">Isi data contoh</button>'}</div>`
         : Motion.isSim() ? `<div class="banner"><b>Mode simulasi.</b> Perangkat ini nggak ngirim data sensor gerak. Buka PAAADEL di HP lewat Safari atau Chrome buat latihan beneran.</div>` : ''}
       ${tabbar('home')}
@@ -946,7 +946,9 @@
       const x = i * bw + bw * 0.22, w = bw * 0.56, y = Y(v);
       return `<rect class="st-bar ${cls}${i === arr.length - 1 ? ' last' : ''}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${(H - 3 - y).toFixed(1)}" rx="${Math.min(3, w / 2).toFixed(1)}"/>`;
     }).join('');
-    svg.innerHTML = band + bars + `<line class="st-base" x1="0" x2="${W}" y1="${H - 2.5}" y2="${H - 2.5}"/>`;
+    const li = arr.length - 1, ball = li >= 0 ? `<circle class="st-ball" cx="${(li * bw + bw / 2).toFixed(1)}" cy="${Math.max(5, Y(arr[li]) - 6).toFixed(1)}" r="4"/>` : '';
+    svg.classList.toggle('zone', !!zOn);
+    svg.innerHTML = band + bars + `<line class="st-base" x1="0" x2="${W}" y1="${H - 2.5}" y2="${H - 2.5}"/>` + ball;
   }
   function zoneSheet(after) {
     const bestBall = S.best.racket ? ballOf(S.best.racket) : 0, base = bestBall || 60;
@@ -1044,9 +1046,9 @@
       $('#sN').textContent = st.n;
       $('#sBest').textContent = '≈' + fv(ballOf(st.best)); $('#sBestR').textContent = fv(st.best) + ' raket';
       const cue = $('#cue');
-      cue.textContent = sat ? 'Mentok batas giroskop HP, aslinya bisa lebih kenceng!'
-        : z === 'in' ? 'Pas di zona! Pertahanin temponya.' : z === 'high' ? 'Kekencengan. Kontrol dikit.' : z === 'low' ? 'Kurang kenceng. Lecutin lagi.'
-        : st.newBest ? 'Rekor baru! Pertahanin.' : 'Lecutin pergelangan kayak nyambuk. Tiap bunyi = 1 rep.';
+      cue.textContent = sat ? 'Mentok batas giroskop HP, aslinya bisa lebih kenceng'
+        : z === 'in' ? 'Pas di zona. Pertahanin temponya.' : z === 'high' ? 'Kekencengan. Kontrol dikit.' : z === 'low' ? 'Kurang kenceng. Lecutin lagi.'
+        : st.newBest ? 'Rekor baru. Pertahanin.' : 'Lecutin pergelangan kayak nyambuk. Tiap bunyi = 1 rep.';
       cue.className = 'sub center cue' + (z === 'in' ? ' good' : z === 'high' || z === 'low' ? ' warn' : '');
       refreshStats();
       Guard.engage();
@@ -1081,28 +1083,28 @@
 
   function insightCard(p) {
     const row = (pct, color, title, body) => `<div class="ins"><span class="ring-sm" style="--p:${pct ?? 0};--c:${color}"><span>${pct == null ? '–' : pct + '%'}</span></span><div><b>${title}</b><p>${body}</p></div></div>`;
-    let h = p.cons ? row(p.cons.pct, 'var(--teal)', 'Konsistensi', `${p.cons.pct >= 80 ? 'Stabil banget!' : p.cons.pct >= 60 ? 'Lumayan stabil.' : 'Masih naik-turun.'} ${Math.round(p.cons.pct * p.n / 100)} dari ${p.n} ayunan dalam ±${fv(BAND)} ${U()} dari median ≈${fv(p.cons.med)}.`)
+    let h = p.cons ? row(p.cons.pct, 'var(--teal)', 'Konsistensi', `${p.cons.pct >= 80 ? 'Stabil banget.' : p.cons.pct >= 60 ? 'Lumayan stabil.' : 'Masih naik-turun.'} ${Math.round(p.cons.pct * p.n / 100)} dari ${p.n} ayunan dalam ±${fv(BAND)} ${U()} dari median ≈${fv(p.cons.med)}.`)
       : row(null, 'var(--teal)', 'Konsistensi', 'Muncul kalau kamu ngayun minimal 5 kali.');
-    if (p.zone) { const pct = Math.round(p.zone.hit / p.zone.n * 100); h += row(pct, 'var(--orange)', `Di zona ${p.zone.max >= 200 ? '≥' + fv(p.zone.min) : fv(p.zone.min) + '–' + fv(p.zone.max)} ${U()}`, `${p.zone.hit} dari ${p.zone.n} ayunan masuk zona. ${pct >= 70 ? 'Kontrolnya mantap!' : 'Fokus ke tempo, bukan power.'}`); }
+    if (p.zone) { const pct = Math.round(p.zone.hit / p.zone.n * 100); h += row(pct, 'var(--orange)', `Di zona ${p.zone.max >= 200 ? '≥' + fv(p.zone.min) : fv(p.zone.min) + '–' + fv(p.zone.max)} ${U()}`, `${p.zone.hit} dari ${p.zone.n} ayunan masuk zona. ${pct >= 70 ? 'Kontrolnya mantap.' : 'Fokus ke tempo, bukan power.'}`); }
     return `<div class="card insights">${h}</div>`;
   }
 
   SCREENS.freeDone = function (p) {
     const td = peekDay(dayKey()), left = set.goal - td.sw;
     app.innerHTML = `<section class="scr">
-      <div class="done-head"><span class="medal">${ICON.trophy}</span><h1 class="title-lg">Mantap, sesi kelar!</h1><p class="sub">Bola tercepat kamu tadi</p></div>
+      <div class="done-head"><h1 class="title-lg">Sesi kelar</h1><p class="sub">Bola tercepat kamu tadi</p></div>
       <div class="bigspeed"><span class="ap">≈</span>${fv(ballOf(p.best))}<span class="u">${U()}</span></div>
       <p class="sub center">Raket ${fv(p.best)} ${U()}</p>
-      ${p.newBest ? `<span class="badge">${ICON.bolt} Rekor baru!</span>` : ''}
+      ${p.newBest ? `<span class="badge">${ICON.bolt}Rekor baru</span>` : ''}
       <div class="stats3">
         <div><b>${p.n}</b><small>&nbsp;</small><span>Rep</span></div>
         <div><b>≈${fv(ballOf(p.avg))}</b><small>${fv(p.avg)} raket</small><span>Rata-rata</span></div>
         <div><b>${mmss(p.dur)}</b><small>&nbsp;</small><span>Waktu</span></div>
       </div>
       ${insightCard(p)}
-      <p class="note center">Hari ini ${td.sw}/${set.goal} ayunan. ${left > 0 ? `Kurang ${left} lagi buat nutup target.` : 'Target harian kelar!'}</p>
+      <p class="note center">Hari ini ${td.sw}/${set.goal} ayunan. ${left > 0 ? `Kurang ${left} lagi buat nutup target.` : 'Target harian kelar.'}</p>
       <div class="grow"></div>
-      <button class="btn go" data-act="done">Sip, balik ke beranda</button>
+      <button class="btn go" data-act="done">Balik ke beranda</button>
     </section>`;
     actions = { done: () => go('home'), back: () => go('home') };
     Snd.play('done', 0.7);
@@ -1116,12 +1118,12 @@
       <path d="M86 90l6 14h8l6-14" style="stroke:var(--teal)" stroke-width="4"/><rect x="91" y="104" width="10" height="34" rx="4" style="fill:var(--teal)" stroke="none"/>
       <text x="170" y="74" style="fill:var(--ink-3)" font-size="30" font-family="Plus Jakarta Sans,system-ui" text-anchor="middle" stroke="none">=</text>
       <rect x="216" y="28" width="44" height="96" rx="9" style="stroke:var(--ink)" stroke-width="4"/><path d="M230 36h16" style="stroke:var(--ink)" stroke-width="3"/>
-      <text x="170" y="154" style="fill:var(--ink-2)" font-size="12.5" font-weight="700" font-family="Plus Jakarta Sans,system-ui" text-anchor="middle" stroke="none">Atas HP = ujung raket</text>
+      <text x="170" y="154" style="fill:var(--ink-2)" font-size="12.5" font-weight="600" font-family="Plus Jakarta Sans,system-ui" text-anchor="middle" stroke="none">Atas HP = ujung raket</text>
       <rect x="62" y="172" width="34" height="58" rx="7" style="fill:var(--well);stroke:var(--ink-3)" stroke-width="2.5"/><circle cx="73" cy="183" r="4" style="stroke:var(--ink-3)" stroke-width="2"/><circle cx="84" cy="183" r="4" style="stroke:var(--ink-3)" stroke-width="2"/>
-      <path d="M118 198c14-10 30-10 44 0" style="stroke:var(--orange)" stroke-width="2.5"/><path d="M156 191l7 7-9 3" style="stroke:var(--orange)" stroke-width="2.5"/>
-      <rect x="184" y="172" width="34" height="58" rx="7" style="fill:var(--orange)" stroke="none"/>
-      <text x="79" y="166" style="fill:var(--ink-3)" font-size="9.5" font-weight="700" font-family="Plus Jakarta Sans,system-ui" text-anchor="middle" stroke="none">BUKAN GINI</text>
-      <text x="201" y="166" style="fill:var(--orange)" font-size="9.5" font-weight="700" font-family="Plus Jakarta Sans,system-ui" text-anchor="middle" stroke="none">LAYAR KE DEPAN</text>
+      <path d="M118 198c14-10 30-10 44 0" style="stroke:var(--teal)" stroke-width="2.5"/><path d="M156 191l7 7-9 3" style="stroke:var(--teal)" stroke-width="2.5"/>
+      <rect x="184" y="172" width="34" height="58" rx="7" style="fill:var(--teal)" stroke="none"/>
+      <text x="79" y="166" style="fill:var(--ink-3)" font-size="10.5" font-weight="600" font-family="Plus Jakarta Sans,system-ui" text-anchor="middle" stroke="none">Bukan gini</text>
+      <text x="201" y="166" style="fill:var(--teal)" font-size="10.5" font-weight="600" font-family="Plus Jakarta Sans,system-ui" text-anchor="middle" stroke="none">Layar ke depan</text>
       <text x="284" y="198" style="fill:var(--ink-2)" font-size="11" font-family="Plus Jakarta Sans,system-ui" text-anchor="middle" stroke="none">Layar =</text>
       <text x="284" y="213" style="fill:var(--ink-2)" font-size="11" font-family="Plus Jakarta Sans,system-ui" text-anchor="middle" stroke="none">muka raket</text>
     </g></svg>`;
@@ -1151,7 +1153,7 @@
     const tab = p.tab || 'new';
     const list = REPLAYS.slice().sort((a, b) => b.date - a.date);
     app.innerHTML = `<section class="scr tabbed">
-      <header class="hdr"><div><h1 class="title">Analisis 3D</h1><p class="sub">Rekam 1 pukulan, lihat ayunanmu dari segala sudut.</p></div><button class="round" data-act="how" aria-label="Cara pegang HP">${ICON.hand}</button></header>
+      <header class="hdr"><div><h1 class="title">Analisis 3D</h1><p class="sub">Rekam 1 pukulan, lihat ayunanmu dari segala sudut</p></div><button class="round" data-act="how" aria-label="Cara pegang HP">${ICON.hand}</button></header>
       <div class="seg" role="tablist"><button data-act="tabsel" data-k="new" aria-pressed="${tab === 'new'}">Rekam baru</button><button data-act="tabsel" data-k="rep" aria-pressed="${tab === 'rep'}">Replay · ${list.length}</button></div>
       ${tab === 'new' ? `
         <span class="label">Mau rekam pukulan apa?</span>
@@ -1160,8 +1162,8 @@
         <div class="seg compact"><button data-act="hand" data-k="R" aria-pressed="${set.hand === 'R'}">Kanan</button><button data-act="hand" data-k="L" aria-pressed="${set.hand === 'L'}">Kiri</button></div>
         <button class="btn go" data-act="go">Mulai rekam</button>
         <p class="note center">Tik, tik, ding, langsung pukul. Replay kebuka sendiri.</p>`
-      : `<div class="list">${list.length ? list.map(r => `<div class="row" style="padding-left:6px">
-            <button class="round ghost" data-act="star" data-id="${r.id}" aria-label="${r.star ? 'Hapus bintang' : 'Kasih bintang'}" style="color:${r.star ? 'var(--orange)' : 'var(--ink-3)'}">${r.star ? ICON.starFill : ICON.star}</button>
+      : `<div class="list">${list.length ? list.map(r => `<div class="row" style="padding-left:8px">
+            <button class="round ghost" data-act="star" data-id="${r.id}" aria-label="${r.star ? 'Hapus bintang' : 'Kasih bintang'}" style="color:${r.star ? 'var(--teal)' : 'var(--ink-3)'}">${r.star ? ICON.starFill : ICON.star}</button>
             <button class="row" data-act="open" data-id="${r.id}" style="padding:4px 0;border:0;min-height:0;flex:1">
               <span class="t"><b>${STROKES[r.stroke].n}</b><span>${whenLabel(r.date)} · ≈${fv(ballOf(r.peak))} ${U()} bola · ${BALL_RES[ballFlight(r).res][0].toLowerCase()}${r.src === 'gyro' ? '' : ' · muka ' + faceTxt(faceMetrics(r).face).toLowerCase()}</span></span><span class="vs">${ICON.chev}</span></button></div>`).join('')
           : '<div class="row"><span class="sub">Belum ada replay. Rekam 1 pukulan dulu di tab Rekam baru.</span></div>'}</div>
@@ -1323,9 +1325,9 @@
     const dial = `<svg class="dial" viewBox="0 0 124 108" aria-hidden="true"><line class="dl-g" x1="4" y1="${cy}" x2="122" y2="${cy}"/><path class="dl-w" d="M${cx} ${cy}L${f2(l0[0])} ${f2(l0[1])}A46 46 0 0 0 ${f2(l1[0])} ${f2(l1[1])}Z"/><line class="dl-f" x1="${f2(e1[0])}" y1="${f2(e1[1])}" x2="${f2(e2[0])}" y2="${f2(e2[1])}"/><line class="dl-n" x1="${cx}" y1="${cy}" x2="${f2(tp[0])}" y2="${f2(tp[1])}"/><circle class="dl-h" cx="${f2(tp[0])}" cy="${f2(tp[1])}" r="4.5"/><text x="122" y="${cy + 15}" text-anchor="end">net →</text></svg>`;
     return `<div class="card face">
       <div class="chart-head"><h3>Muka raket saat kena</h3><span class="pill ${pill[1]}">${pill[0]}</span></div>
-      <div class="face-row">${dial}<div><b class="face-v">${faceTxt(f)}</b><p class="sub">Patokan ${name}: ${angTxt(lo)} sampai ${angTxt(hi)}.</p><p class="sub" style="margin-top:6px">${tip}</p></div></div>
+      <div class="face-row">${dial}<div><b class="face-v">${faceTxt(f)}</b><p class="sub">Patokan ${name}: ${angTxt(lo)} sampai ${angTxt(hi)}</p><p class="sub" style="margin-top:8px">${tip}</p></div></div>
       <div class="face-meta ball-meta"><span>Kena pakai<b>${m.side < 0 ? 'Muka backhand' : 'Muka forehand'}</b></span><span>Kepala raket<b>${Math.abs(m.head)}° ${m.head >= 0 ? 'di atas' : 'di bawah'} pergelangan</b></span><span>Lecutan<b>${m.whip.toFixed(2).replace('.', ',')} dtk</b></span></div>
-      <p class="note" style="padding:10px 0 0">Dibaca dari kemiringan HP pas titik kena, di sisi yang mukul (layar = muka forehand, belakang HP = muka backhand); area hijau = patokan umum, bukan aturan mati. Lecutan = waktu dari mulai ngebut sampai puncak, makin singkat makin tajam.</p>
+      <p class="note" style="padding:12px 0 0">Dibaca dari kemiringan HP pas titik kena, di sisi yang mukul (layar = muka forehand, belakang HP = muka backhand); area hijau = patokan umum, bukan aturan mati. Lecutan = waktu dari mulai ngebut sampai puncak, makin singkat makin tajam.</p>
     </div>`;
   }
 
@@ -1342,12 +1344,12 @@
     const fm = rep.src === 'gyro' ? null : faceMetrics(rep), [flo, fhi] = FACE[st], fClosed = !!fm && fm.face < flo, fOpen = !!fm && fm.face > fhi;
     const lowBounce = fl.after && fl.after.h < 1.1, sideKick = fl.after && fl.after.wall === 'side';
     const inTip = () => {
-      if (st === 'LB') return fl.depth >= 7 ? 'Lob dalam, mantap! Lawan dipaksa mundur ke kaca.' : 'Lob-nya kurang dalam. Angkat dikit lagi biar jatuh dekat kaca belakang lawan.';
+      if (st === 'LB') return fl.depth >= 7 ? 'Lob dalam, mantap. Lawan dipaksa mundur ke kaca.' : 'Lob-nya kurang dalam. Angkat dikit lagi biar jatuh dekat kaca belakang lawan.';
       if (st === 'VB') return sp.rpm < 900 || Math.abs(sp.side) < 0.25 ? 'Masuk, tapi spinnya kurang. Potong bolanya dari samping (sisi luar bola) sambil ayun ke depan-bawah biar ada spin samping.'
-        : sideKick ? 'Víbora mantap! Slice + spin samping bikin bola mantul rendah ke kaca samping.' : 'Víbora masuk dan ada spinnya. Arahin lebih ke samping biar mantulnya nyari kaca samping.';
+        : sideKick ? 'Víbora mantap. Slice + spin samping bikin bola mantul rendah ke kaca samping.' : 'Víbora masuk dan ada spinnya. Arahin lebih ke samping biar mantulnya nyari kaca samping.';
       if (st === 'BJ') return lowBounce ? 'Bandeja aman: masuk, mantulnya rendah, lawan susah nyerang balik.' : 'Masuk, tapi mantulnya agak tinggi. Potong bolanya lebih banyak (slice) biar mantulnya rendah.';
-      if (st === 'SM') return fl.after && fl.after.h >= 1.6 ? 'Smash masuk dan mantulnya tinggi. Mantap!' : 'Smash masuk. Pukul lebih ke bawah biar mantulnya tinggi dan susah dibalikin.';
-      return lowOver ? 'Mantap! Rendah di atas net dan masuk.' : 'Masuk, tapi agak tinggi di atas net. Tutup dikit muka raketnya biar lebih tajam.';
+      if (st === 'SM') return fl.after && fl.after.h >= 1.6 ? 'Smash masuk dan mantulnya tinggi, mantap.' : 'Smash masuk. Pukul lebih ke bawah biar mantulnya tinggi dan susah dibalikin.';
+      return lowOver ? 'Mantap, rendah di atas net dan masuk.' : 'Masuk, tapi agak tinggi di atas net. Tutup dikit muka raketnya biar lebih tajam.';
     };
     const tip = {
       in: inTip(),
@@ -1375,7 +1377,7 @@
     app.innerHTML = `<section class="scr" style="gap:12px">
       ${subhdr(STROKES[rep.stroke].n, `<button class="round" data-act="del" aria-label="Hapus replay">${ICON.trash}</button>`)}
       <div class="r3d" id="r3d"><canvas id="c3d" aria-label="Replay 3D ayunan"></canvas><div class="r3d-load" id="r3dLoad">Lagi nyiapin 3D…</div>
-        <div class="tools"><button class="chip" data-act="resetView">${ICON.reset}Reset</button><span style="display:flex;gap:6px"><button class="chip" data-act="look">${ICON.sliders}Tampilan</button><button class="chip" data-act="snap">${ICON.image}Simpan</button></span></div></div>
+        <div class="tools"><button class="chip" data-act="resetView">${ICON.reset}Reset</button><span style="display:flex;gap:8px"><button class="chip" data-act="look">${ICON.sliders}Tampilan</button><button class="chip" data-act="snap">${ICON.image}Simpan</button></span></div></div>
       <div class="seg compact" id="viewSeg" role="group" aria-label="Sudut kamera">${[['auto', 'Auto'], ['swing', 'Belakang'], ['side', 'Samping'], ['court', 'Lapangan']].map(([k, l]) => `<button data-act="view" data-k="${k}" aria-pressed="${k === 'auto'}">${l}</button>`).join('')}</div>
       <div class="r-info"><span class="when" id="rInfo"></span><span class="note">${whenLabel(rep.date)}</span></div>
       <div class="r-speeds"><div><span>Bola ≈</span><b class="or" id="rBall">0</b><small>${U()}</small></div><div><span>Raket</span><b id="rRacket">0</b><small>${U()}</small></div></div>
@@ -1397,14 +1399,16 @@
     const wAt = tt => { let i = 0; while (i < rep.t.length - 2 && rep.t[i + 1] < tt) i++; const f = clamp((tt - rep.t[i]) / Math.max(1e-6, rep.t[i + 1] - rep.t[i]), 0, 1); return SER[i] + (SER[i + 1] - SER[i]) * f; };
     const sp = $('#spark'), sctx = sp.getContext('2d');
     function drawSpark() {
-      const cs = getComputedStyle(document.documentElement), teal = cs.getPropertyValue('--teal').trim() || '#0E8A7A', orange = cs.getPropertyValue('--orange').trim() || '#FF6A2B', surf = cs.getPropertyValue('--surface').trim() || '#fff';
+      const cs = getComputedStyle(document.documentElement), v = (k, d) => cs.getPropertyValue(k).trim() || d;
+      const ink2 = v('--ink-2', '#4E5653'), ink3 = v('--ink-3', '#6E7673'), ball = v('--ball', '#E2F24A'), edge = v('--ball-edge', '#141917');
       const dpr = Math.min(devicePixelRatio || 1, 2), W = sp.clientWidth, H = sp.clientHeight; if (!W) return;
       sp.width = W * dpr; sp.height = H * dpr; sctx.setTransform(dpr, 0, 0, dpr, 0, 0); sctx.clearRect(0, 0, W, H);
       const maxW = PK * 1.08, X = tt => (tt - T0) / (T1 - T0) * W, Y = w => H - 3 - (w / maxW) * (H - 9);
       const path = () => { sctx.beginPath(); rep.t.forEach((tt, i) => { const x = X(tt), y = Y(SER[i]); i ? sctx.lineTo(x, y) : sctx.moveTo(x, y); }); };
-      path(); sctx.lineTo(X(rep.t[rep.t.length - 1]), H); sctx.lineTo(X(rep.t[0]), H); sctx.closePath(); sctx.globalAlpha = 0.14; sctx.fillStyle = teal; sctx.fill(); sctx.globalAlpha = 1;
-      path(); sctx.strokeStyle = teal; sctx.lineWidth = 2.2; sctx.lineJoin = 'round'; sctx.stroke();
-      sctx.beginPath(); sctx.arc(X(0), Y(SER[peakIdx(rep)]), 5, 0, 7); sctx.fillStyle = orange; sctx.fill(); sctx.lineWidth = 2.5; sctx.strokeStyle = surf; sctx.stroke();
+      path(); sctx.lineTo(X(rep.t[rep.t.length - 1]), H); sctx.lineTo(X(rep.t[0]), H); sctx.closePath(); sctx.globalAlpha = 0.1; sctx.fillStyle = ink3; sctx.fill(); sctx.globalAlpha = 1;
+      path(); sctx.strokeStyle = ink2; sctx.lineWidth = 2; sctx.lineJoin = 'round'; sctx.stroke();
+      // the contact moment = the ball
+      sctx.beginPath(); sctx.arc(X(0), Y(SER[peakIdx(rep)]), 5, 0, 7); sctx.fillStyle = ball; sctx.fill(); sctx.lineWidth = 1.5; sctx.strokeStyle = edge; sctx.stroke();
     }
     function ui() {
       const r = t > lastS ? wAt(0) : wAt(t);
@@ -1464,7 +1468,7 @@
         const file = new File([blob], `paaadel-${rep.stroke.toLowerCase()}-${dayKey()}.png`, { type: 'image/png' });
         if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: 'Replay PAAADEL' }); return; }
       } catch (e) { if (e && e.name === 'AbortError') return; }
-      openOv(`<div class="shdr"><h2 class="title">Simpan gambar</h2><button class="link" data-act="close">Tutup</button></div><img class="snap" src="${url}" alt="Replay ${esc(STROKES[rep.stroke].n)}"><p class="note center">Tekan lama gambarnya buat simpan atau share.</p>`, { close: closeOv });
+      openOv(`<div class="shdr"><h2 class="title">Simpan gambar</h2><button class="link" data-act="close">Tutup</button></div><img class="snap" src="${url}" alt="Replay ${esc(STROKES[rep.stroke].n)}"><p class="note center">Tekan lama gambarnya buat simpan atau share</p>`, { close: closeOv });
     }
   };
 
@@ -1946,7 +1950,7 @@
     const card = w => `<button class="wcard" data-act="open" data-id="${w.id}"><span class="top"><b>${esc(w.name)}</b><span class="dur">${ICON.clock}${wMins(w)} mnt</span></span>
       <span class="pills">${w.blocks.filter(b => b.kind !== 'rest').map(b => `<span>${b.secs ? b.secs + 'd' : b.reps} ${b.stroke}</span>`).join('')}</span></button>`;
     app.innerHTML = `<section class="scr tabbed">
-      <header class="hdr"><div><h1 class="title">Program</h1><p class="sub">Drill padel, dipandu suara coach.</p></div></header>
+      <header class="hdr"><div><h1 class="title">Program</h1><p class="sub">Drill padel, dipandu suara coach</p></div></header>
       <span class="label section">Siap pakai</span>
       ${PRESETS.map(card).join('')}
       <span class="label section">Program kamu</span>
@@ -1965,8 +1969,8 @@
     app.innerHTML = `<section class="scr">
       ${subhdr('', `<button class="round" data-act="voice" aria-label="Suara coach ${set.coach ? 'nyala' : 'mati'}">${set.coach ? ICON.spk : ICON.spkOff}</button>`)}
       <h1 class="title-lg">${esc(w.name)}</h1>
-      <div style="display:flex;gap:8px;flex-wrap:wrap"><span class="dur">${ICON.clock}${wMins(w)} mnt</span><span class="dur" style="background:var(--teal-soft)">${nBlocks} blok pukulan</span><span class="dur" style="background:var(--well)">Coach ${set.coach ? 'nyala' : 'mati'}</span></div>
-      <div class="card" style="padding:10px 16px"><ol class="timeline">${w.blocks.map(b => b.kind === 'rest'
+      <p class="meta"><span class="dur">${ICON.clock}${wMins(w)} mnt</span><span>${nBlocks} blok pukulan</span><span>Coach ${set.coach ? 'nyala' : 'mati'}</span></p>
+      <div class="card" style="padding:8px 16px"><ol class="timeline">${w.blocks.map(b => b.kind === 'rest'
         ? `<li class="rest"><span class="node">${ICON.rest}</span><span class="nm">Istirahat</span><span class="amt">${b.secs} dtk</span></li>`
         : `<li><span class="node">${++n}</span><span class="nm">${STROKES[b.stroke].n}</span><span class="amt">${b.secs ? b.secs + ' dtk' : '× ' + b.reps}</span></li>`).join('')}</ol></div>
       <div class="grow"></div>
@@ -2003,7 +2007,7 @@
     function blockEd(b, i) {
       const mv = `<div class="mv"><button data-act="up" data-i="${i}" aria-label="Naikin">${ICON.up}</button><button data-act="dn" data-i="${i}" aria-label="Turunin">${ICON.down}</button><button data-act="rm" data-i="${i}" aria-label="Hapus blok">${ICON.x}</button></div>`;
       const step = (val, unit) => `<div class="stepper"><button data-act="dec" data-i="${i}" aria-label="Kurangin">${ICON.minus}</button><output>${val}</output><button data-act="inc" data-i="${i}" aria-label="Tambahin">${ICON.plus}</button><span class="sub">${unit}</span></div>`;
-      if (b.kind === 'rest') return `<div class="ed-block rest"><div class="top"><span style="flex:1;font-weight:700;color:var(--ink-2)">${i + 1}. Istirahat</span>${mv}</div><div class="bot">${step(b.secs, 'detik')}</div></div>`;
+      if (b.kind === 'rest') return `<div class="ed-block rest"><div class="top"><span style="flex:1;font-weight:500;color:var(--ink-2)">${i + 1}. Istirahat</span>${mv}</div><div class="bot">${step(b.secs, 'detik')}</div></div>`;
       return `<div class="ed-block"><div class="top"><select data-i="${i}" aria-label="Jenis pukulan">${STROKE_ORDER.map(k => `<option value="${k}" ${k === b.stroke ? 'selected' : ''}>${i + 1}. ${STROKES[k].n}</option>`).join('')}</select>${mv}</div>
         <div class="bot">${b.secs ? step(b.secs, 'detik') : step(b.reps, 'kali')}<div class="seg compact" style="min-width:150px"><button data-act="mode" data-i="${i}" data-k="reps" aria-pressed="${!b.secs}">Rep</button><button data-act="mode" data-i="${i}" data-k="secs" aria-pressed="${!!b.secs}">Waktu</button></div></div></div>`;
     }
@@ -2055,7 +2059,7 @@
       if (b.secs) Coach.say(`${first ? w.name + '. ' : ''}${n}, ${b.secs} detik. Gas!`, `${first ? w.name + '. ' : ''}${en}, ${b.secs} seconds. Go!`);
       else Coach.say(`${first ? w.name + '. ' : ''}${n}, ${b.reps} kali. Gas!`, `${first ? w.name + '. ' : ''}${en}, ${b.reps} reps. Go!`);
     }
-    const nextLabel = i => blocks[i] ? 'Abis ini: ' + blockLabel(blocks[i]) : 'Ini blok terakhir, habisin!';
+    const nextLabel = i => blocks[i] ? 'Abis ini: ' + blockLabel(blocks[i]) : 'Ini blok terakhir, habisin';
     function startBlock(i) {
       if (i >= blocks.length) return finish(true);
       st.bi = i; st.count = 0; st.bStart = now(); st.said = {};
@@ -2154,18 +2158,18 @@
 
   SCREENS.runDone = function (p) {
     app.innerHTML = `<section class="scr">
-      <div class="done-head"><span class="medal">${ICON.trophy}</span><h1 class="title-lg">${p.completed ? 'Latihan kelar!' : 'Latihan dihentiin'}</h1><p class="sub">${esc(p.name)}</p></div>
-      ${p.newBest ? `<span class="badge">${ICON.bolt} Rekor bola baru!</span>` : ''}
+      <div class="done-head"><h1 class="title-lg">${p.completed ? 'Latihan kelar' : 'Latihan dihentiin'}</h1><p class="sub">${esc(p.name)}</p></div>
+      ${p.newBest ? `<span class="badge">${ICON.bolt}Rekor bola baru</span>` : ''}
       <div class="stats3">
         <div><b>${p.n}</b><small>&nbsp;</small><span>Rep</span></div>
         <div><b>${mmss(p.dur)}</b><small>&nbsp;</small><span>Waktu</span></div>
         <div><b class="or">${p.best ? '≈' + fv(ballOf(p.best)) : '–'}</b><small>${p.best ? fv(p.best) + ' raket' : '&nbsp;'}</small><span>Terbaik</span></div>
       </div>
       ${p.n ? insightCard({ n: p.n, cons: p.cons }) : ''}
-      <div class="list"><ol class="res">${p.res.map(r => { const tgt = r.b.reps || null; const ok = tgt ? r.done >= tgt : r.done > 0; return `<li><span class="${ok ? 'ok' : 'miss'}">${ok ? ICON.check : ICON.x}</span><span style="font-weight:700">${STROKES[r.b.stroke].n}</span><span class="num" style="color:var(--ink-2);font-size:14px">${tgt ? r.done + '/' + tgt : r.done + ' rep'}</span><span class="num or" style="min-width:52px;text-align:right;font-size:14px">${r.best ? '≈' + fv(ballOf(r.best)) : '–'}</span></li>`; }).join('')}</ol></div>
-      <p class="note">Angka oranye = bola tercepat di tiap blok (${U()}).</p>
+      <div class="list"><ol class="res">${p.res.map(r => { const tgt = r.b.reps || null; const ok = tgt ? r.done >= tgt : r.done > 0; return `<li><span class="${ok ? 'ok' : 'miss'}">${ok ? ICON.check : ICON.x}</span><span style="font-weight:500">${STROKES[r.b.stroke].n}</span><span class="num" style="color:var(--ink-2);font-size:14px">${tgt ? r.done + '/' + tgt : r.done + ' rep'}</span><span class="num or" style="min-width:52px;text-align:right;font-size:14px">${r.best ? '≈' + fv(ballOf(r.best)) : '–'}</span></li>`; }).join('')}</ol></div>
+      <p class="note">Angka oranye = bola tercepat di tiap blok (${U()})</p>
       <div class="grow"></div>
-      <button class="btn go" data-act="done">Sip, balik ke beranda</button>
+      <button class="btn go" data-act="done">Balik ke beranda</button>
     </section>`;
     actions = { done: () => go('home'), back: () => go('home') };
     if (p.completed) Snd.play('done', 0.7);
@@ -2186,17 +2190,17 @@
     app.innerHTML = `<section class="scr tabbed">
       <header class="hdr"><div><h1 class="title">Progres</h1><p class="sub">${S.firstDay ? `Latihan sejak ${fmtDate(keyDate(S.firstDay))}. Konsisten itu kuncinya.` : 'Belum ada latihan. Ayunan pertamamu mulai dari sini.'}</p></div></header>
       <div class="sum4">
-        <div><span class="ic">${ICON.swing}</span><b>${total}</b><span>Total ayunan</span></div>
-        <div><span class="ic o">${ICON.flame}</span><b>${st.current}</b><span>Hari beruntun</span></div>
-        <div><span class="ic">${ICON.cal}</span><b>${practicedDays}</b><span>Hari latihan</span></div>
-        <div><span class="ic o">${ICON.boltL}</span><b>${S.best.racket ? '≈' + fv(ballOf(S.best.racket)) : '–'}</b><span>Rekor bola (${U()})</span></div>
+        <div><span>Total ayunan</span><b>${total}</b></div>
+        <div><span>Hari beruntun</span><b>${st.current}</b></div>
+        <div><span>Hari latihan</span><b>${practicedDays}</b></div>
+        <div><span>Rekor bola (${U()})</span><b class="or">${S.best.racket ? '≈' + fv(ballOf(S.best.racket)) : '–'}</b></div>
       </div>
       <div class="card" id="fast"></div>
       <div class="card" id="bars"></div>
       <div class="card" id="heat"></div>
       <div class="card" id="mix"></div>
       <div class="list">
-        <div class="row"><span class="k">${ICON.target}Hari ini</span><span class="vs"><b class="num" style="color:var(--ink)">${td.sw}/${set.goal}</b><button class="link" data-act="goal" style="padding:0 0 0 6px">Ubah target</button></span></div>
+        <div class="row"><span class="k">${ICON.target}Hari ini</span><span class="vs"><b class="num" style="color:var(--ink)">${td.sw}/${set.goal}</b><button class="link" data-act="goal" style="padding:0 0 0 8px">Ubah target</button></span></div>
         ${[['wave', 'Konsistensi 7 hari', cons7], ['clock', 'Sesi', S.sessions.length], ['clip', 'Program kelar', S.workoutsDone], ['cube', 'Replay direkam', S.replaysMade], ['clock', 'Waktu latihan', dur(totalSec)], ['cal', 'Latihan minggu ini', dur(weekSec)], ['trophy', 'Streak terpanjang', st.longest + ' hari']]
           .map(([ic, k, v]) => `<div class="row"><span class="k">${ICON[ic]}${k}</span><span class="v">${v}</span></div>`).join('')}
       </div>
@@ -2221,7 +2225,7 @@
     const val = k => conv(statsMetric === 'ball' ? ballOf(S.days[k].best) : S.days[k].best);
     const last = ks.length ? Math.round(val(ks[ks.length - 1])) : null;
     let body;
-    if (!ks.length) body = '<p class="note" style="padding:14px 0">Belum ada data kecepatan. Sesi berikutnya bakal jadi titik pertama.</p>';
+    if (!ks.length) body = '<p class="note" style="padding:16px 0">Belum ada data kecepatan. Sesi berikutnya bakal jadi titik pertama.</p>';
     else {
       const W = 320, H = 150, pl = 6, pr = 30, pt = 10, pb = 22;
       const ts = ks.map(k => keyDate(k).getTime()), t0 = ts[0], t1 = Math.max(ts[ts.length - 1], t0 + 864e5);
@@ -2234,9 +2238,9 @@
         ${ks.length > 1 ? `<path class="ln" d="${path}"/>` : ''}
         ${ks.map((k, i) => `<circle class="dot ${i === ks.length - 1 ? 'last' : ''}" cx="${X(ts[i])}" cy="${Y(vs[i])}" r="${i === ks.length - 1 ? 5.5 : 4}"/><circle class="hit" cx="${X(ts[i])}" cy="${Y(vs[i])}" r="14" data-act="pick" data-lbl="${fmtDate(keyDate(k))}: <b>${Math.round(vs[i])}</b> ${U()}"><title>${fmtDate(keyDate(k))}: ${Math.round(vs[i])} ${U()}</title></circle>`).join('')}
         <text x="${pl}" y="${H - 4}">${fmtDate(keyDate(ks[0]))}</text>${ks.length > 1 ? `<text x="${W - pr}" y="${H - 4}" text-anchor="end">${ks[ks.length - 1] === dayKey() ? 'Hari ini' : fmtDate(keyDate(ks[ks.length - 1]))}</text>` : ''}
-      </svg>${ks.length < 3 ? '<p class="note" style="padding:6px 0 0">Balik lagi minggu depan buat lihat trennya.</p>' : ''}`;
+      </svg>${ks.length < 3 ? '<p class="note" style="padding:8px 0 0">Balik lagi minggu depan buat lihat trennya</p>' : ''}`;
     }
-    el.innerHTML = `<div class="chart-head"><div><h3>Makin ngebut?</h3><p class="sub" data-sel style="margin-top:2px;font-size:13px">Kecepatan terbaik per hari</p></div><div class="v">${last != null ? last : '–'}<small>${U()} terakhir</small></div></div>
+    el.innerHTML = `<div class="chart-head"><div><h3>Makin ngebut?</h3><p class="sub" data-sel style="margin-top:4px;font-size:13px">Kecepatan terbaik per hari</p></div><div class="v">${last != null ? last : '–'}<small>${U()} terakhir</small></div></div>
       <div class="seg compact" style="margin-bottom:12px"><button data-act="metric" data-k="ball" aria-pressed="${statsMetric === 'ball'}">Bola ≈</button><button data-act="metric" data-k="racket" aria-pressed="${statsMetric === 'racket'}">Raket</button></div>${body}`;
   }
   function drawBars() {
@@ -2264,7 +2268,7 @@
     }).join('');
     const xl = [0, Math.floor(n / 2), n - 1].map(i => `<text x="${pl + i * bw + bw / 2}" y="${H - 5}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}">${bins[i].lbl}</text>`).join('');
     const per = statsBars === 'day' ? 'hari' : statsBars === 'week' ? 'minggu' : 'bulan';
-    el.innerHTML = `<div class="chart-head"><div><h3>Ayunan per ${per}</h3><p class="sub" data-sel style="margin-top:2px;font-size:13px">Rata-rata ${avg}. Tap batang buat lihat angka.</p></div><div class="v">${cur}<small>${per} ini</small></div></div>
+    el.innerHTML = `<div class="chart-head"><div><h3>Ayunan per ${per}</h3><p class="sub" data-sel style="margin-top:4px;font-size:13px">Rata-rata ${avg}. Tap batang buat lihat angka.</p></div><div class="v">${cur}<small>${per} ini</small></div></div>
       <div class="seg compact" style="margin-bottom:12px">${[['day', 'Hari'], ['week', 'Minggu'], ['month', 'Bulan']].map(([k, l]) => `<button data-act="bars" data-k="${k}" aria-pressed="${statsBars === k}">${l}</button>`).join('')}</div>
       <svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Jumlah ayunan per ${per}">
         ${ticks.map(v => `<line class="${v === 0 ? 'base' : 'grid'}" x1="${pl}" x2="${W - pr}" y1="${Y(v)}" y2="${Y(v)}"/><text x="${W - pr + 6}" y="${Y(v) + 3.5}">${v}</text>`).join('')}
@@ -2288,7 +2292,7 @@
       cells += `<rect class="h${lvl(v)} ${k === dayKey() ? 'today' : ''}" x="${left + c * (cs + gap)}" y="${top + r * (cs + gap)}" width="${cs}" height="${cs}" rx="4" data-act="pick" data-lbl="${fmtDate(d)}: <b>${v}</b> ayunan"><title>${fmtDate(d)}: ${v} ayunan</title></rect>`;
     }
     const dl = ['S', '', 'R', '', 'J', '', 'M'].map((t, r) => t ? `<text x="0" y="${top + r * (cs + gap) + 11}">${t}</text>` : '').join('');
-    el.innerHTML = `<div class="chart-head"><div><h3>Kalender latihan</h3><p class="sub" data-sel style="margin-top:2px;font-size:13px">17 minggu terakhir</p></div><div class="v">${nDays}<small>hari latihan</small></div></div>
+    el.innerHTML = `<div class="chart-head"><div><h3>Kalender latihan</h3><p class="sub" data-sel style="margin-top:4px;font-size:13px">17 minggu terakhir</p></div><div class="v">${nDays}<small>hari latihan</small></div></div>
       <svg class="heat" viewBox="0 0 ${W} ${H}" role="img" aria-label="Kalender latihan 17 minggu">${months}${dl}${cells}</svg>
       <div class="legend">Dikit <svg class="heat" viewBox="0 0 84 12" aria-hidden="true">${[0, 1, 2, 3, 4].map(i => `<rect class="h${i}" x="${i * 17}" y="0" width="12" height="12" rx="3"/>`).join('')}</svg> Target ×2</div>`;
   }
@@ -2451,7 +2455,7 @@
   /* ---------- profile (body size for the 3D analysis) ---------- */
   SCREENS.profile = function (p = {}) {
     const pr = set.profile;
-    const num = (id, val, ph, unit, label) => `<label class="field"><span class="label">${label}</span><span style="display:flex;align-items:center;gap:10px"><input id="${id}" type="number" inputmode="numeric" placeholder="${ph}" value="${val ?? ''}" autocomplete="off"><span class="sub" style="min-width:24px">${unit}</span></span></label>`;
+    const num = (id, val, ph, unit, label) => `<label class="field"><span class="label">${label}</span><span style="display:flex;align-items:center;gap:12px"><input id="${id}" type="number" inputmode="numeric" placeholder="${ph}" value="${val ?? ''}" autocomplete="off"><span class="sub" style="min-width:24px">${unit}</span></span></label>`;
     app.innerHTML = `<section class="scr">
       ${subhdr('Profil kamu')}
       <p class="sub">Biar Analisis 3D ngikutin badanmu, bukan ukuran rata-rata. Makin tinggi kamu, makin tinggi titik kena bola dan makin jauh jangkauan tanganmu.</p>
@@ -2485,7 +2489,7 @@
       ${subhdr('Pengaturan')}
       <span class="label section">Target harian</span>
       <div class="list"><div class="row"><span class="k">${ICON.target}Ayunan per hari</span><div class="stepper"><button data-act="gdec" aria-label="Kurangin">${ICON.minus}</button><output id="goalV">${set.goal}</output><button data-act="ginc" aria-label="Tambahin">${ICON.plus}</button></div></div></div>
-      <p class="note">Target di beranda penuh setelah jumlah ini (dari latihan bebas & program).</p>
+      <p class="note">Target di beranda penuh setelah jumlah ini (dari latihan bebas & program)</p>
 
       <span class="label section">Suara & getar</span>
       <div class="list">
@@ -2514,7 +2518,7 @@
         <div class="row"><span class="k">${ICON.hand}Tangan dominan</span>${seg('hand', set.hand, [['R', 'Kanan'], ['L', 'Kiri']])}</div>
         <button class="row" data-act="sens"><span class="k">${ICON.sliders}Sensitivitas</span><span class="vs" id="sensV">${SENS[set.sens].label} ${ICON.chev}</span></button>
         <div class="row"><span class="k">${ICON.lock}Kunci layar pas ngayun</span>${switchBtn('t-autolock', set.autolock, 'Kunci layar pas ngayun')}</div>
-        <div class="row" style="flex-direction:column;align-items:stretch;gap:6px"><span class="k" style="justify-content:space-between">Kalibrasi kecepatan <b class="num" id="calV">×${set.calib.toFixed(2)}</b></span><input type="range" id="calib" min="0.8" max="1.3" step="0.01" value="${set.calib}" aria-label="Kalibrasi kecepatan"></div>
+        <div class="row" style="flex-direction:column;align-items:stretch;gap:8px"><span class="k" style="justify-content:space-between">Kalibrasi kecepatan <b class="num" id="calV">×${set.calib.toFixed(2)}</b></span><input type="range" id="calib" min="0.8" max="1.3" step="0.01" value="${set.calib}" aria-label="Kalibrasi kecepatan"></div>
       </div>
       <p class="note">Kunci layar bikin telapak tangan nggak sengaja mencet tombol pas HP digenggam; tahan ikon gembok buat buka. Kalibrasi ngegeser semua angka kecepatan berikutnya, misalnya kalau kamu pernah diukur pakai radar.</p>
 
@@ -2538,7 +2542,7 @@
         <button class="row" data-act="wipe"><span class="k" style="color:var(--danger)">${ICON.trash}Hapus semua data latihan</span></button>
       </div>
       <p class="note">Data PAAADEL cuma disimpen di HP ini. Simpan backup ke Files, Google Drive, atau kirim ke chat sendiri biar progres aman kalau ganti HP. Tips: pasang PAAADEL ke Layar Utama biar datanya lebih awet.</p>
-      <p class="note center">PAAADEL ${VERSION} · semua data cuma disimpen di HP ini.</p>
+      <p class="note center">PAAADEL ${VERSION} · semua data cuma disimpen di HP ini</p>
     </section>`;
     const tog = key => b => { set[key] = !set[key]; b.setAttribute('aria-checked', set[key]); persist(); if (key === 'sound' && set.sound) Snd.hit(0.8); };
     const segAct = (key, after) => b => { set[key] = b.dataset.k; persist(); b.parentElement.querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x.dataset.k === set[key])); after && after(); };
@@ -2605,9 +2609,9 @@
         <div class="row"><span class="k">${ICON.sensor}Orientasi α / β / γ</span><span class="vs num" id="sO">–</span></div>
       </div>
       <p class="note">Pegang HP kayak raket (atas HP = ujung raket, layar = muka forehand). Forehand, backhand, atau overhead (bandeja, víbora, smash): bunyi kalau kehitung. Ancang-ancang, raket jatuh di belakang punggung sebelum smash, balik ke posisi siap, atau cuma muter pergelangan: nggak bunyi. Kalau kalibrasi arah belum kekunci, gerak-gerakin HP pelan ke segala arah beberapa detik.</p>
-      <div class="card" style="padding:14px 16px">
+      <div class="card" style="padding:16px">
         <div class="chart-head"><h3>Rekam data mentah</h3><span class="note" id="rawN"></span></div>
-        <p class="sub" style="margin-bottom:10px">Kalau deteksinya masih aneh di HP kamu: rekam 15 detik sambil ayun beberapa forehand & backhand, terus kirim file-nya ke yang bikin aplikasi ini buat disetel.</p>
+        <p class="sub" style="margin-bottom:12px">Kalau deteksinya masih aneh di HP kamu: rekam 15 detik sambil ayun beberapa forehand & backhand, terus kirim file-nya ke yang bikin aplikasi ini buat disetel.</p>
         <button class="btn line small" data-act="raw" id="rawBtn">Mulai rekam 15 dtk</button>
       </div>
       <div class="grow"></div>
